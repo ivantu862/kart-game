@@ -140,6 +140,7 @@ const wrapA=a=>{a%=TAU;if(a>Math.PI)a-=TAU;else if(a<-Math.PI)a+=TAU;return a;};
 const V3=THREE.Vector3;
 const $=id=>document.getElementById(id);
 
+const RACER_SCALES=[1.0, 1.0, 0.95, 0.85, 0.95, 1.15, 1.05, 0.65]; /* per-racer size multiplier (Racer 1..8) */
 let LAPS=3; const BASE=48, GRAV=34, ROAD_HALF=12.5, GROUND_Y=-4; let WALL=19, SHW=18.4;
 
 /* ---------------- Racers ---------------- */
@@ -1332,7 +1333,7 @@ const shadowGeo=new THREE.PlaneGeometry(4.4,5.2).rotateX(-Math.PI/2);
 const FLAME_O=new THREE.ConeGeometry(0.38,2.4,10,1,true).rotateX(-Math.PI/2).translate(0,0,-1.2);
 const FLAME_I=new THREE.ConeGeometry(0.18,1.5,8,1,true).rotateX(-Math.PI/2).translate(0,0,-0.75);
 /* ---------------- custom .glb drivers ---------------- */
-const DRIVER_H=1.45, DRIVER_Y=0.50, SEAT_Y=1.0; /* driver height, base offset above seat anchor, seat anchor height */
+const DRIVER_H=1.35, DRIVER_Y=0.05, SEAT_Y=0.35; /* driver height, base offset above seat anchor, seat anchor height */
 const GLB={};let glbOK=0,glbFail=0;
 ROSTER.forEach((r,i)=>r.idx=i);
 function setDriverModel(m,idx){
@@ -1372,8 +1373,11 @@ function loadGLBs(onLoad){
   const ld=new THREE.GLTFLoader();glbStatus();
   for(let i=0;i<8;i++){
     ld.load('./models/racer'+(i+1)+'.glb',g=>{
-      try{g.scene.updateMatrixWorld(true);const b=new THREE.Box3().setFromObject(g.scene),sz=new THREE.Vector3(),c=new THREE.Vector3();b.getSize(sz);b.getCenter(c);
-        GLB[i]={scene:g.scene,clips:g.animations||[],s:DRIVER_H/Math.max(sz.y,1e-4),cx:c.x,cz:c.z,minY:b.min.y};glbOK++;onLoad(i);}
+      try{g.scene.updateMatrixWorld(true);const b=new THREE.Box3(),sz=new THREE.Vector3(),c=new THREE.Vector3(),mb=new THREE.Box3();
+        g.scene.traverse(o=>{if(!o.isMesh)return;for(let a=o;a;a=a.parent)if(!a.visible)return;
+          if(o.geometry){if(!o.geometry.boundingBox)o.geometry.computeBoundingBox();mb.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);b.union(mb);}});
+        if(b.isEmpty())throw new Error('no visible meshes');b.getSize(sz);b.getCenter(c);
+        GLB[i]={scene:g.scene,clips:g.animations||[],s:DRIVER_H*(RACER_SCALES[i]||1)/Math.max(sz.y,1e-4),cx:c.x,cz:c.z,minY:b.min.y};glbOK++;onLoad(i);}
       catch(e){glbFail++;console.warn('racer'+(i+1)+'.glb unusable',e);}
       glbStatus();
     },undefined,err=>{glbFail++;console.warn('racer'+(i+1)+'.glb failed to load; using built-in driver');glbStatus();});
@@ -1387,6 +1391,7 @@ function makeKartMesh(def){
   // chassis, nose, bumper, side pods
   bx(2.3,0.28,3.6,dk,0,0.42,0.05);
   bx(1.9,0.62,2.7,mb,0,0.86,-0.15);
+  bx(1.9,0.25,3.6,bk,0,0.15,0); /* dark floorboard under the chassis */
   const nose=new THREE.Mesh(new THREE.CylinderGeometry(0.5,0.88,1.7,10).rotateX(Math.PI/2),mb);nose.scale.x=1.25;nose.position.set(0,0.8,1.75);body.add(nose);
   bx(2.5,0.3,0.5,wh,0,0.52,2.7);
   bx(0.5,0.12,0.8,yl,0,1.2,1.65);
