@@ -123,7 +123,7 @@ button.go{font-size:26px;padding:10px 40px;background:linear-gradient(#5fe36a,#1
   <div class="btnrow"><button class="b go" id="again">RACE AGAIN</button><button class="b" id="totitle">TITLE</button></div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 <script>
@@ -1332,7 +1332,7 @@ const shadowGeo=new THREE.PlaneGeometry(4.4,5.2).rotateX(-Math.PI/2);
 const FLAME_O=new THREE.ConeGeometry(0.38,2.4,10,1,true).rotateX(-Math.PI/2).translate(0,0,-1.2);
 const FLAME_I=new THREE.ConeGeometry(0.18,1.5,8,1,true).rotateX(-Math.PI/2).translate(0,0,-0.75);
 /* ---------------- custom .glb drivers ---------------- */
-const DRIVER_H=1.15; /* driver height in kart units (raise to make drivers bigger) */
+const DRIVER_H=1.45, DRIVER_Y=0.50, SEAT_Y=1.0; /* driver height, base offset above seat anchor, seat anchor height */
 const GLB={};let glbOK=0,glbFail=0;
 ROSTER.forEach((r,i)=>r.idx=i);
 function setDriverModel(m,idx){
@@ -1340,17 +1340,36 @@ function setDriverModel(m,idx){
   const G=GLB[idx];
   m.procParts.forEach(o=>o.visible=!G);
   if(!G){m.drv.position.y=1.15;return;}
-  m.drv.position.y=0.92;
+  m.drv.position.y=SEAT_Y;
   const root=THREE.SkeletonUtils?THREE.SkeletonUtils.clone(G.scene):G.scene.clone(true);
   root.scale.setScalar(G.s);root.position.set(-G.cx*G.s,-G.minY*G.s,-G.cz*G.s);
   root.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;o.frustumCulled=false;}});
-  const wrap=new THREE.Group();wrap.position.y=0.18;wrap.add(root);m.drv.add(wrap);m.drvModel=wrap;
+  const wrap=new THREE.Group();wrap.position.y=DRIVER_Y;wrap.add(root);m.drv.add(wrap);m.drvModel=wrap;
   if(G.clips&&G.clips.length){const clip=G.clips.find(c=>/idle/i.test(c.name))||G.clips[0];m.mixer=new THREE.AnimationMixer(root);m.mixer.clipAction(clip).play();}
 }
-function glbStatus(){const e=document.getElementById('glbst');if(e)e.textContent=THREE.GLTFLoader?('Custom drivers: '+glbOK+'/8'+(glbFail?' ('+glbFail+' missing → built-in)':'')):'GLTFLoader unavailable → built-in drivers';}
+function glbStatus(){const e=document.getElementById('glbst');if(e)e.textContent=THREE.GLTFLoader?('Custom drivers: '+glbOK+'/8'+(glbFail?' ('+glbFail+' missing → built-in)':'')):'GLTFLoader could not be downloaded (check your internet / CDN access) → built-in drivers';}
+const GLTF_FALLBACKS=['https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js','https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js','https://fastly.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js'];
+const SKEL_FALLBACKS=['https://unpkg.com/three@0.128.0/examples/js/utils/SkeletonUtils.js','https://fastly.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js'];
+function loadScriptChain(urls,test,done){
+  if(test()){done(true);return;}
+  if(!urls.length){done(false);return;}
+  const e=document.createElement('script');e.src=urls[0];
+  e.onload=()=>loadScriptChain(test()?[]:urls.slice(1),test,done);
+  e.onerror=()=>loadScriptChain(urls.slice(1),test,done);
+  document.head.appendChild(e);
+}
+let glbTried=false;
 function loadGLBs(onLoad){
-  if(!THREE.GLTFLoader){glbStatus();return;}
-  const ld=new THREE.GLTFLoader();
+  if(!THREE.GLTFLoader){
+    if(glbTried){glbStatus();return;}glbTried=true;
+    const e=document.getElementById('glbst');if(e)e.textContent='Loading GLTFLoader…';
+    loadScriptChain(GLTF_FALLBACKS,()=>!!THREE.GLTFLoader,ok=>{
+      if(!ok){glbStatus();return;}
+      loadScriptChain(SKEL_FALLBACKS,()=>!!THREE.SkeletonUtils,()=>loadGLBs(onLoad));
+    });
+    return;
+  }
+  const ld=new THREE.GLTFLoader();glbStatus();
   for(let i=0;i<8;i++){
     ld.load('./models/racer'+(i+1)+'.glb',g=>{
       try{g.scene.updateMatrixWorld(true);const b=new THREE.Box3().setFromObject(g.scene),sz=new THREE.Vector3(),c=new THREE.Vector3();b.getSize(sz);b.getCenter(c);
@@ -2125,7 +2144,7 @@ buildCards();setMode(1);buildTracks();
 
 /* ---------- boot: attract-mode title ---------- */
 loadTrack(0);resetRace(0,[]);state.phase='title';state.go=true;
-loadGLBs(i=>{karts.forEach(k=>{if(k.def.idx===i)setDriverModel(k.mesh,i);});if(tKart&&tIdx===i){tScene.remove(tKart.group);tKart=null;tIdx=-1;}});glbStatus();
+loadGLBs(i=>{karts.forEach(k=>{if(k.def.idx===i)setDriverModel(k.mesh,i);});if(tKart&&tIdx===i){tScene.remove(tKart.group);tKart=null;tIdx=-1;}});
 karts.forEach(k=>{k.speed=0;});
 requestAnimationFrame(frame);
 })();
