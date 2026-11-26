@@ -1364,13 +1364,27 @@ function setKartModel(m,idx){
   m.kwheels=[];
   if(KART_HAS_WHEELS){
     root.updateMatrixWorld(true);const inv=new THREE.Matrix4().copy(root.matrixWorld).invert(),found=[];
-    root.traverse(o=>{if(o===root||!/wheel|tire|tyre/i.test(o.name))return;for(let a=o.parent;a&&a!==root;a=a.parent)if(found.includes(a))return;found.push(o);});
-    found.forEach(n=>{const bb=new THREE.Box3(),mb=new THREE.Box3();
-      n.traverse(q=>{if(q.isMesh&&q.geometry){if(!q.geometry.boundingBox)q.geometry.computeBoundingBox();mb.copy(q.geometry.boundingBox).applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv,q.matrixWorld));bb.union(mb);}});
+    const WRE=/wheel|tire|tyre|rueda|roue|ruota|rim|tread/i;
+    root.traverse(o=>{if(o===root||!WRE.test(o.name))return;for(let a=o.parent;a&&a!==root;a=a.parent)if(found.includes(a))return;found.push(o);});
+    const lbox=n=>{const bb=new THREE.Box3(),mb=new THREE.Box3();n.traverse(q=>{if(q.isMesh&&q.geometry){if(!q.geometry.boundingBox)q.geometry.computeBoundingBox();mb.copy(q.geometry.boundingBox).applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv,q.matrixWorld));bb.union(mb);}});return bb;};
+    let how='by name';
+    if(found.length<2){ /* no usable names: look for round, low, side-mounted parts (dy~dz, thin in x) */
+      found.length=0;const kb=lbox(root),ks=kb.getSize(new THREE.Vector3());
+      const cands=[];root.traverse(o=>{if(!o.isMesh)return;const bb=lbox(o);if(bb.isEmpty())return;const z=bb.getSize(new THREE.Vector3()),c=bb.getCenter(new THREE.Vector3());
+        const big=Math.max(z.y,z.z);if(big<ks.z*0.12||big>ks.z*0.55)return;if(Math.abs(z.y-z.z)/big>0.3||z.x>big*0.95)return;
+        if(c.y>kb.min.y+ks.y*0.5)return;if(Math.abs(c.x-(kb.min.x+kb.max.x)/2)<ks.x*0.25)return;cands.push({o,bb,c,big});});
+      const groups=[];cands.forEach(k=>{const g=groups.find(g=>g.c.distanceTo(k.c)<g.big*0.7);if(g)g.items.push(k);else groups.push({c:k.c.clone(),big:k.big,items:[k]});});
+      groups.forEach(g=>g.items.forEach(k=>found.push(k.o)));how='by shape';
+      m._clusters=groups;
+    }
+    const piv0=new Map();
+    (m._clusters&&how==='by shape'?m._clusters.map(g=>g.items.map(k=>k.o)):found.map(n=>[n])).forEach(list=>{
+      const bb=new THREE.Box3();list.forEach(n=>bb.union(lbox(n)));
       if(bb.isEmpty())return;const c=bb.getCenter(new THREE.Vector3());
-      const piv=new THREE.Group();piv.rotation.order='YXZ';piv.position.copy(c);root.add(piv);piv.updateMatrixWorld(true);piv.attach(n);
+      const piv=new THREE.Group();piv.rotation.order='YXZ';piv.position.copy(c);root.add(piv);piv.updateMatrixWorld(true);list.forEach(n=>piv.attach(n));
       m.kwheels.push({piv,front:c.z>0});});
-    if(m.kwheels.length<2){console.warn('kart1.glb: found '+m.kwheels.length+' nodes named wheel/tire/tyre; using built-in wheels');m.kwheels=[];}
+    KINFO='kart wheels: '+m.kwheels.length+' '+how;
+    if(m.kwheels.length<2){KINFO='kart wheels: none found (using built-in)';console.warn('kart1.glb: found '+m.kwheels.length+' nodes named wheel/tire/tyre; using built-in wheels');m.kwheels=[];}
   }
   const own=m.kwheels.length>=2;
   m.wheels.forEach(w=>{w.wg.visible=!own;});
@@ -1378,42 +1392,54 @@ function setKartModel(m,idx){
 /* T-pose fix: bend both arms forward so the hands rest on the steering wheel.
    Finds the two hand bones (names with hand/wrist), takes forearm = parent, upper arm = grandparent, and aims them at targets. */
 const ARM_ELBOW=[0.30,0.50,0.12], ARM_HAND=[0.20,0.64,0.52]; /* targets in driver space (x is mirrored for the other arm) */
-function poseArms(root,wrap,sc){
+const ARM_BAD=new Set();
+function makeArmPoser(root,wrap,sc){
   root.updateMatrixWorld(true);wrap.updateWorldMatrix(true,false);
   const isH=n=>/hand|wrist/i.test(n)&&!/finger|thumb|index|mid|ring|pinky|pink/i.test(n);
   const hands=[];root.traverse(o=>{if(o.isBone&&isH(o.name)&&!(o.parent&&o.parent.isBone&&isH(o.parent.name)))hands.push(o);});
-  if(hands.length<2)return false;
-  const V=THREE.Vector3,Q=THREE.Quaternion;
+  const V=THREE.Vector3,Q=THREE.Quaternion,chains=[];
+  for(const sd of [-1,1]){
+    const h=hands.filter(o=>Math.sign(wrap.worldToLocal(new V().setFromMatrixPosition(o.matrixWorld)).x||1)===sd)[0];
+    if(h&&h.parent&&h.parent.isBone&&h.parent.parent&&h.parent.parent.isBone)chains.push({sd,h,fore:h.parent,up:h.parent.parent});
+  }
+  if(!chains.length)return null;
   const aim=(b,c,t)=>{b.updateWorldMatrix(true,false);c.updateWorldMatrix(true,false);
     const bp=new V().setFromMatrixPosition(b.matrixWorld),cp=new V().setFromMatrixPosition(c.matrixWorld);
     const dq=new Q().setFromUnitVectors(cp.sub(bp).normalize(),t.clone().sub(bp).normalize());
     const bq=new Q(),pq=new Q();b.getWorldQuaternion(bq);if(b.parent)b.parent.getWorldQuaternion(pq);
     b.quaternion.copy(pq.invert().multiply(dq).multiply(bq));b.updateMatrixWorld(true);};
-  let done=0;
-  for(const sd of [-1,1]){
-    const h=hands.filter(o=>Math.sign(wrap.worldToLocal(new V().setFromMatrixPosition(o.matrixWorld)).x||1)===sd)[0];
-    if(!h||!h.parent||!h.parent.isBone||!h.parent.parent||!h.parent.parent.isBone)continue;
-    const fore=h.parent,up=fore.parent;
-    aim(up,fore,wrap.localToWorld(new V(sd*ARM_ELBOW[0]*sc,ARM_ELBOW[1]*sc,ARM_ELBOW[2]*sc)));
-    aim(fore,h,wrap.localToWorld(new V(sd*ARM_HAND[0]*sc,ARM_HAND[1]*sc,ARM_HAND[2]*sc)));done++;
-  }
-  return done>0;
+  return function(){ /* runs every frame after the animation mixer so the hands stay on the wheel */
+    wrap.updateWorldMatrix(true,false);
+    for(const c of chains){
+      aim(c.up,c.fore,wrap.localToWorld(new V(c.sd*ARM_ELBOW[0]*sc,ARM_ELBOW[1]*sc,ARM_ELBOW[2]*sc)));
+      aim(c.fore,c.h,wrap.localToWorld(new V(c.sd*ARM_HAND[0]*sc,ARM_HAND[1]*sc,ARM_HAND[2]*sc)));
+    }
+  };
 }
 function setDriverModel(m,idx){
-  if(m.drvModel){m.drv.remove(m.drvModel);m.drvModel=null;}m.mixer=null;
+  if(m.drvModel){m.drv.remove(m.drvModel);m.drvModel=null;}m.mixer=null;m.armFix=null;
   const G=GLB[idx];
   m.procParts.forEach(o=>o.visible=!G);
   const hk=!!m.kartModel;
   if(!G){m.drv.position.set(0,hk?0.62:1.15,hk?-0.1:-0.2);return;}
   m.drv.position.set(0,hk?KART_SEAT_Y:SEAT_Y,hk?-0.1:-0.2);
   const root=THREE.SkeletonUtils?THREE.SkeletonUtils.clone(G.scene):G.scene.clone(true);
-  root.scale.setScalar(G.s);root.position.set(-G.cx*G.s,-G.minY*G.s,-G.cz*G.s);
   root.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;o.frustumCulled=false;}});
-  const wrap=new THREE.Group();wrap.position.y=DRIVER_Y;wrap.add(root);m.drv.add(wrap);m.drvModel=wrap;
-  if(!(G.clips&&G.clips.length))poseArms(root,wrap,RACER_SCALES[idx]||1);
-  if(G.clips&&G.clips.length){const clip=G.clips.find(c=>/idle/i.test(c.name))||G.clips[0];m.mixer=new THREE.AnimationMixer(root);m.mixer.clipAction(clip).play();}
+  const holder=new THREE.Group();holder.add(root); /* holder gets the scale, so animation tracks can't override it */
+  if(G.clips&&G.clips.length){const clip=G.clips.find(c=>/idle/i.test(c.name))||G.clips[0];m.mixer=new THREE.AnimationMixer(root);m.mixer.clipAction(clip).play();m.mixer.update(0);}
+  const mult=RACER_SCALES[idx]||1;let sc=G.s;
+  try{ /* measure the model in its ANIMATED pose (clips can rescale rigs), then fit it to DRIVER_H */
+    const b=visBox(holder),sz=new THREE.Vector3(),c=new THREE.Vector3();b.getSize(sz);b.getCenter(c);
+    sc=Math.min(DRIVER_H/Math.max(sz.y,1e-4),DRIVER_W/Math.max(sz.x,sz.z,1e-4))*mult;
+    holder.scale.setScalar(sc);holder.position.set(-c.x*sc,-b.min.y*sc,-c.z*sc);
+  }catch(e){holder.scale.setScalar(G.s*mult);holder.position.set(-G.cx*G.s*mult,-G.minY*G.s*mult,-G.cz*G.s*mult);}
+  const wrap=new THREE.Group();wrap.position.y=DRIVER_Y;wrap.add(holder);m.drv.add(wrap);m.drvModel=wrap;
+  m.armFix=makeArmPoser(holder,wrap,mult);
+  if(!m.armFix)ARM_BAD.add(idx+1);else ARM_BAD.delete(idx+1);
+  glbStatus();
 }
-function glbStatus(){const e=document.getElementById('glbst');if(e)e.textContent=THREE.GLTFLoader?('Custom drivers: '+glbOK+'/8'+(glbFail?' ('+glbFail+' missing → built-in)':'')):'GLTFLoader could not be downloaded (check your internet / CDN access) → built-in drivers';}
+let KINFO='';
+function glbStatus(){const e=document.getElementById('glbst');if(e)e.textContent=(KINFO?KINFO+' · ':'')+(ARM_BAD.size?'arms not posed: Racer '+[...ARM_BAD].join(',')+' · ':'')+(THREE.GLTFLoader?('Custom drivers: '+glbOK+'/8'+(glbFail?' ('+glbFail+' missing → built-in)':'')):'GLTFLoader could not be downloaded (check your internet / CDN access) → built-in drivers');}
 const GLTF_FALLBACKS=['https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js','https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js','https://fastly.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js'];
 const SKEL_FALLBACKS=['https://unpkg.com/three@0.128.0/examples/js/utils/SkeletonUtils.js','https://fastly.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js'];
 function loadScriptChain(urls,test,done){
@@ -1925,7 +1951,7 @@ function updateKart(k,dt,I,first){
   }
 }
 function updateKartVisual(k,dt,I){
-  const m=k.mesh,g=k.group;if(m.mixer)m.mixer.update(dt);if(m.disc){const dm=m.disc.material;dm.opacity=k.human&&k.stun<=0?0.5+0.15*Math.sin(state.time*5):0;if(k.drift&&k.tier>0)dm.color.setHex([0x00f5d4,0x00f5d4,0xffd43b,0xb24dff][k.tier]);else dm.color.setHex(k.def.color);}
+  const m=k.mesh,g=k.group;if(m.mixer)m.mixer.update(dt);if(m.armFix)m.armFix();if(m.disc){const dm=m.disc.material;dm.opacity=k.human&&k.stun<=0?0.5+0.15*Math.sin(state.time*5):0;if(k.drift&&k.tier>0)dm.color.setHex([0x00f5d4,0x00f5d4,0xffd43b,0xb24dff][k.tier]);else dm.color.setHex(k.def.color);}
   g.position.set(k.x,k.y+k.hopY+(k.stun>0?Math.sin(k.stun*8)*0.4:0),k.z);
   _qS.setFromUnitVectors(UP,k.nv);_qY.setFromAxisAngle(UP,k.h+k.spinA);g.quaternion.copy(_qS).multiply(_qY);
   const steer=state.go&&k.stun<=0?I.steer:0; k.steerVis+=(steer-k.steerVis)*Math.min(1,dt*12);
@@ -2178,7 +2204,7 @@ function drawTurn(){
   const el=$('turnbox');if(!el||!el.getClientRects().length||state.phase!=='title'||$('title').classList.contains('hide'))return;
   const now=performance.now(),dt=Math.min(0.1,(now-tLast)/1000);tLast=now;
   setTurn(state.turnIdx===undefined?state.pick[0]:state.turnIdx);
-  tKart.group.rotation.y+=dt*0.9;if(tKart.mixer)tKart.mixer.update(dt);
+  tKart.group.rotation.y+=dt*0.9;if(tKart.mixer)tKart.mixer.update(dt);if(tKart.armFix)tKart.armFix();
   tKart.drv.rotation.z=Math.sin(now/700)*0.12;
   const r=el.getBoundingClientRect(),H=innerHeight;if(r.width<10)return;
   tCam.aspect=r.width/r.height;tCam.updateProjectionMatrix();tCam.position.set(6.5,4.2,8.5);tCam.lookAt(0,1.3,0);
@@ -2228,7 +2254,7 @@ buildCards();setMode(1);buildTracks();
 
 /* ---------- boot: attract-mode title ---------- */
 loadTrack(0);resetRace(0,[]);state.phase='title';state.go=true;
-loadGLBs(i=>{if(i<0){karts.forEach(k=>{setKartModel(k.mesh,k.def.idx);setDriverModel(k.mesh,k.def.idx);});tScene.remove(tKart&&tKart.group);tKart=null;tIdx=-1;return;}karts.forEach(k=>{if(k.def.idx===i)setDriverModel(k.mesh,i);});if(tKart&&tIdx===i){tScene.remove(tKart.group);tKart=null;tIdx=-1;}});
+loadGLBs(i=>{if(i<0){karts.forEach(k=>{setKartModel(k.mesh,k.def.idx);setDriverModel(k.mesh,k.def.idx);});tScene.remove(tKart&&tKart.group);tKart=null;tIdx=-1;glbStatus();return;}karts.forEach(k=>{if(k.def.idx===i)setDriverModel(k.mesh,i);});if(tKart&&tIdx===i){tScene.remove(tKart.group);tKart=null;tIdx=-1;}});
 karts.forEach(k=>{k.speed=0;});
 requestAnimationFrame(frame);
 })();
