@@ -1402,6 +1402,22 @@ function makeArmPoser(root,wrap,sc){
     const h=hands.filter(o=>Math.sign(wrap.worldToLocal(new V().setFromMatrixPosition(o.matrixWorld)).x||1)===sd)[0];
     if(h&&h.parent&&h.parent.isBone&&h.parent.parent&&h.parent.parent.isBone)chains.push({sd,h,fore:h.parent,up:h.parent.parent});
   }
+  if(!chains.length){ /* names didn't match: find each arm from the skeleton shape (arm = bone chain reaching farthest out to the side in a T/A-pose) */
+    const bones=[];root.traverse(o=>{if(o.isBone)bones.push(o);});
+    if(bones.length>=6){
+      const P=o=>wrap.worldToLocal(new V().setFromMatrixPosition(o.matrixWorld)),pos=new Map(bones.map(o=>[o,P(o)]));
+      for(const sd of [-1,1]){
+        let tip=null;for(const o of bones){const x=pos.get(o).x*sd;if(x>0&&(!tip||x>pos.get(tip).x*sd))tip=o;}
+        if(!tip)continue;
+        const chain=[];for(let o=tip;o&&o.isBone;o=o.parent)chain.unshift(o);
+        const xs=chain.map(o=>Math.abs(pos.get(o).x)),x0=Math.min(...xs),xt=Math.abs(pos.get(tip).x);
+        if(chain.length<4||xt-x0<0.2*sc)continue;
+        const t=xs.map(x=>(x-x0)/(xt-x0)),pick=g=>{let bi=-1,bd=9;t.forEach((v,i)=>{const d=Math.abs(v-g);if(d<bd){bd=d;bi=i;}});return bi;};
+        const iu=pick(0.2),ifr=pick(0.55),ih=pick(0.82);
+        if(iu<ifr&&ifr<ih)chains.push({sd,h:chain[ih],fore:chain[ifr],up:chain[iu]});
+      }
+    }
+  }
   if(!chains.length)return null;
   const aim=(b,c,t)=>{b.updateWorldMatrix(true,false);c.updateWorldMatrix(true,false);
     const bp=new V().setFromMatrixPosition(b.matrixWorld),cp=new V().setFromMatrixPosition(c.matrixWorld);
