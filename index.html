@@ -141,10 +141,10 @@ const wrapA=a=>{a%=TAU;if(a>Math.PI)a-=TAU;else if(a<-Math.PI)a+=TAU;return a;};
 const V3=THREE.Vector3;
 const $=id=>document.getElementById(id);
 
-const KART_HAS_WHEELS = false; /* true = kart1.glb already has wheels (hide the built-in spinning ones) */
+const KART_HAS_WHEELS = true; /* true = use the wheels inside kart1.glb (nodes named wheel/tire/tyre spin + steer); false = use the built-in blocky wheels */
 const KART_COLORS = [null, 0x43b047, 0xff77bc, 0x2b65ec, 0x76c442, 0xd97706, 0x7c3aed, 0x8b4513]; /* body tint per racer (null = original colors) */
 const RACER_SCALES = [1.0, 1.0, 0.95, 0.85, 0.95, 1.15, 1.05, 0.65]; /* per-racer driver size multiplier */
-const KART_LEN=2.1, KART_Y=0.25; /* per-racer size multiplier (Racer 1..8) */
+const KART_LEN=2.1, KART_Y=KART_HAS_WHEELS?0:0.25; /* model's own wheels rest on the road; built-in wheels need the body lifted */ /* per-racer size multiplier (Racer 1..8) */
 let LAPS=3; const BASE=48, GRAV=34, ROAD_HALF=12.5, GROUND_Y=-4; let WALL=19, SHW=18.4;
 
 /* ---------------- Racers ---------------- */
@@ -1346,7 +1346,7 @@ function setKartModel(m,idx){
   if(m.kartModel){m.body.remove(m.kartModel);m.kartModel=null;}
   const on=!!KGLB, k=KART_LEN/3.6;
   m.chassisParts.forEach(o=>o.visible=!on);m.swg.visible=!on;
-  m.wheels.forEach(w=>{w.wg.visible=on?!KART_HAS_WHEELS:true;w.wg.scale.setScalar(on?k*1.05:1);w.wg.position.set(w.p0.x*(on?k*1.05:1),w.p0.y*(on?k*1.05:1),w.p0.z*(on?k*1.05:1));});
+  m.wheels.forEach(w=>{w.wg.visible=true;w.wg.scale.setScalar(on?k*1.05:1);w.wg.position.set(w.p0.x*(on?k*1.05:1),w.p0.y*(on?k*1.05:1),w.p0.z*(on?k*1.05:1));});
   m.flames.forEach(f=>{f.fg.position.set(f.p0.x*(on?0.55:1),f.p0.y*(on?0.6:1),on?-KART_LEN*0.5-0.15:f.p0.z);});
   if(!on)return;
   const root=THREE.SkeletonUtils?THREE.SkeletonUtils.clone(KGLB.scene):KGLB.scene.clone(true);
@@ -1361,6 +1361,43 @@ function setKartModel(m,idx){
       return starify(c,m.su);});
     o.material=Array.isArray(o.material)?nm:nm[0];});
   const wrap=new THREE.Group();wrap.add(root);m.body.add(wrap);m.kartModel=wrap;
+  m.kwheels=[];
+  if(KART_HAS_WHEELS){
+    root.updateMatrixWorld(true);const inv=new THREE.Matrix4().copy(root.matrixWorld).invert(),found=[];
+    root.traverse(o=>{if(o===root||!/wheel|tire|tyre/i.test(o.name))return;for(let a=o.parent;a&&a!==root;a=a.parent)if(found.includes(a))return;found.push(o);});
+    found.forEach(n=>{const bb=new THREE.Box3(),mb=new THREE.Box3();
+      n.traverse(q=>{if(q.isMesh&&q.geometry){if(!q.geometry.boundingBox)q.geometry.computeBoundingBox();mb.copy(q.geometry.boundingBox).applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv,q.matrixWorld));bb.union(mb);}});
+      if(bb.isEmpty())return;const c=bb.getCenter(new THREE.Vector3());
+      const piv=new THREE.Group();piv.rotation.order='YXZ';piv.position.copy(c);root.add(piv);piv.updateMatrixWorld(true);piv.attach(n);
+      m.kwheels.push({piv,front:c.z>0});});
+    if(m.kwheels.length<2){console.warn('kart1.glb: found '+m.kwheels.length+' nodes named wheel/tire/tyre; using built-in wheels');m.kwheels=[];}
+  }
+  const own=m.kwheels.length>=2;
+  m.wheels.forEach(w=>{w.wg.visible=!own;});
+}
+/* T-pose fix: bend both arms forward so the hands rest on the steering wheel.
+   Finds the two hand bones (names with hand/wrist), takes forearm = parent, upper arm = grandparent, and aims them at targets. */
+const ARM_ELBOW=[0.30,0.50,0.12], ARM_HAND=[0.20,0.64,0.52]; /* targets in driver space (x is mirrored for the other arm) */
+function poseArms(root,wrap,sc){
+  root.updateMatrixWorld(true);wrap.updateWorldMatrix(true,false);
+  const isH=n=>/hand|wrist/i.test(n)&&!/finger|thumb|index|mid|ring|pinky|pink/i.test(n);
+  const hands=[];root.traverse(o=>{if(o.isBone&&isH(o.name)&&!(o.parent&&o.parent.isBone&&isH(o.parent.name)))hands.push(o);});
+  if(hands.length<2)return false;
+  const V=THREE.Vector3,Q=THREE.Quaternion;
+  const aim=(b,c,t)=>{b.updateWorldMatrix(true,false);c.updateWorldMatrix(true,false);
+    const bp=new V().setFromMatrixPosition(b.matrixWorld),cp=new V().setFromMatrixPosition(c.matrixWorld);
+    const dq=new Q().setFromUnitVectors(cp.sub(bp).normalize(),t.clone().sub(bp).normalize());
+    const bq=new Q(),pq=new Q();b.getWorldQuaternion(bq);if(b.parent)b.parent.getWorldQuaternion(pq);
+    b.quaternion.copy(pq.invert().multiply(dq).multiply(bq));b.updateMatrixWorld(true);};
+  let done=0;
+  for(const sd of [-1,1]){
+    const h=hands.filter(o=>Math.sign(wrap.worldToLocal(new V().setFromMatrixPosition(o.matrixWorld)).x||1)===sd)[0];
+    if(!h||!h.parent||!h.parent.isBone||!h.parent.parent||!h.parent.parent.isBone)continue;
+    const fore=h.parent,up=fore.parent;
+    aim(up,fore,wrap.localToWorld(new V(sd*ARM_ELBOW[0]*sc,ARM_ELBOW[1]*sc,ARM_ELBOW[2]*sc)));
+    aim(fore,h,wrap.localToWorld(new V(sd*ARM_HAND[0]*sc,ARM_HAND[1]*sc,ARM_HAND[2]*sc)));done++;
+  }
+  return done>0;
 }
 function setDriverModel(m,idx){
   if(m.drvModel){m.drv.remove(m.drvModel);m.drvModel=null;}m.mixer=null;
@@ -1373,6 +1410,7 @@ function setDriverModel(m,idx){
   root.scale.setScalar(G.s);root.position.set(-G.cx*G.s,-G.minY*G.s,-G.cz*G.s);
   root.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;o.frustumCulled=false;}});
   const wrap=new THREE.Group();wrap.position.y=DRIVER_Y;wrap.add(root);m.drv.add(wrap);m.drvModel=wrap;
+  if(!(G.clips&&G.clips.length))poseArms(root,wrap,RACER_SCALES[idx]||1);
   if(G.clips&&G.clips.length){const clip=G.clips.find(c=>/idle/i.test(c.name))||G.clips[0];m.mixer=new THREE.AnimationMixer(root);m.mixer.clipAction(clip).play();}
 }
 function glbStatus(){const e=document.getElementById('glbst');if(e)e.textContent=THREE.GLTFLoader?('Custom drivers: '+glbOK+'/8'+(glbFail?' ('+glbFail+' missing → built-in)':'')):'GLTFLoader could not be downloaded (check your internet / CDN access) → built-in drivers';}
@@ -1393,7 +1431,10 @@ function getLoader(){if(_ld)return _ld;_ld=new THREE.GLTFLoader();
   return _ld;}
 function visBox(scene){scene.updateMatrixWorld(true);const b=new THREE.Box3(),mb=new THREE.Box3();
   scene.traverse(o=>{if(!o.isMesh)return;for(let a=o;a;a=a.parent)if(!a.visible)return;
-    if(o.geometry){if(!o.geometry.boundingBox)o.geometry.computeBoundingBox();mb.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);b.union(mb);}});
+    if(o.isSkinnedMesh&&o.boneTransform){ /* skinned models: bone/armature scale changes the real size, so measure the posed vertices */
+      o.skeleton.update();const pa=o.geometry.attributes.position,v=new THREE.Vector3();
+      for(let i=0;i<pa.count;i++){v.fromBufferAttribute(pa,i);o.boneTransform(i,v);v.applyMatrix4(o.matrixWorld);b.expandByPoint(v);}
+    }else if(o.geometry){if(!o.geometry.boundingBox)o.geometry.computeBoundingBox();mb.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);b.union(mb);}});
   if(b.isEmpty())throw new Error('no visible meshes');return b;}
 let glbTried=false;
 function loadGLBs(onLoad){
@@ -1478,7 +1519,7 @@ function makeKartMesh(def){
   flames.forEach(f=>{f.o.castShadow=false;f.i.castShadow=false;});
   const disc=new THREE.Mesh(new THREE.CircleGeometry(3.4,32),new THREE.MeshBasicMaterial({color:def.color,transparent:true,opacity:0.0,depthWrite:false,blending:THREE.AdditiveBlending}));disc.rotation.x=-Math.PI/2;disc.position.y=0.12;g.add(disc);
   drv.children.forEach(o=>procParts.push(o));
-  const res={group:g,body,wheels,head:headG,drv,swg,flames,fo,fi,su,disc,procParts,chassisParts,drvModel:null,mixer:null,kartModel:null};
+  const res={kwheels:[],group:g,body,wheels,head:headG,drv,swg,flames,fo,fi,su,disc,procParts,chassisParts,drvModel:null,mixer:null,kartModel:null};
   flames.forEach(f=>{f.p0=f.fg.position.clone();});wheels.forEach(w=>{w.p0=w.wg.position.clone();});
   setKartModel(res,def.idx);setDriverModel(res,def.idx);
   return res;
@@ -1893,6 +1934,7 @@ function updateKartVisual(k,dt,I){
   m.drv.rotation.x+=((k.boost>0?-0.2:0)-m.drv.rotation.x)*Math.min(1,dt*8);
   m.head.rotation.y=k.steerVis*0.5;m.head.rotation.z=dl*0.5;
   m.swg.rotation.z=-k.steerVis*1.0;
+  if(m.kwheels)m.kwheels.forEach(w=>{w.piv.rotation.x+=k.speed*dt*0.7;if(w.front)w.piv.rotation.y=k.steerVis*0.5;});
   m.wheels.forEach(w=>{w.sp.rotation.x+=k.speed*dt*0.7;if(w.front)w.wg.rotation.y=k.steerVis*0.5;});
   m.su.value=k.star>0?1:0;
   // blink when invulnerable after hit
