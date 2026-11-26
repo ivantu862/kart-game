@@ -125,6 +125,7 @@ button.go{font-size:26px;padding:10px 40px;background:linear-gradient(#5fe36a,#1
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 <script>
 (function(){
@@ -140,7 +141,10 @@ const wrapA=a=>{a%=TAU;if(a>Math.PI)a-=TAU;else if(a<-Math.PI)a+=TAU;return a;};
 const V3=THREE.Vector3;
 const $=id=>document.getElementById(id);
 
-const RACER_SCALES=[1.0, 1.0, 0.95, 0.85, 0.95, 1.15, 1.05, 0.65]; /* per-racer size multiplier (Racer 1..8) */
+const KART_HAS_WHEELS = false; /* true = kart1.glb already has wheels (hide the built-in spinning ones) */
+const KART_COLORS = [null, 0x43b047, 0xff77bc, 0x2b65ec, 0x76c442, 0xd97706, 0x7c3aed, 0x8b4513]; /* body tint per racer (null = original colors) */
+const RACER_SCALES = [1.0, 1.0, 0.95, 0.85, 0.95, 1.15, 1.05, 0.65]; /* per-racer driver size multiplier */
+const KART_LEN=2.1, KART_Y=0.25; /* per-racer size multiplier (Racer 1..8) */
 let LAPS=3; const BASE=48, GRAV=34, ROAD_HALF=12.5, GROUND_Y=-4; let WALL=19, SHW=18.4;
 
 /* ---------------- Racers ---------------- */
@@ -1333,15 +1337,38 @@ const shadowGeo=new THREE.PlaneGeometry(4.4,5.2).rotateX(-Math.PI/2);
 const FLAME_O=new THREE.ConeGeometry(0.38,2.4,10,1,true).rotateX(-Math.PI/2).translate(0,0,-1.2);
 const FLAME_I=new THREE.ConeGeometry(0.18,1.5,8,1,true).rotateX(-Math.PI/2).translate(0,0,-0.75);
 /* ---------------- custom .glb drivers ---------------- */
-const DRIVER_H=1.35, DRIVER_Y=0.05, SEAT_Y=0.35; /* driver height, base offset above seat anchor, seat anchor height */
+const DRIVER_W=1.4; /* max driver width/depth, stops wide or long models (tails, arms) from overflowing the kart */
+const DRIVER_H=1.35, DRIVER_Y=0.08, SEAT_Y=0.35, KART_SEAT_Y=0.0; /* driver height, base offset above seat anchor, seat anchor height */
 const GLB={};let glbOK=0,glbFail=0;
 ROSTER.forEach((r,i)=>r.idx=i);
+let KGLB=null;
+function setKartModel(m,idx){
+  if(m.kartModel){m.body.remove(m.kartModel);m.kartModel=null;}
+  const on=!!KGLB, k=KART_LEN/3.6;
+  m.chassisParts.forEach(o=>o.visible=!on);m.swg.visible=!on;
+  m.wheels.forEach(w=>{w.wg.visible=on?!KART_HAS_WHEELS:true;w.wg.scale.setScalar(on?k*1.05:1);w.wg.position.set(w.p0.x*(on?k*1.05:1),w.p0.y*(on?k*1.05:1),w.p0.z*(on?k*1.05:1));});
+  m.flames.forEach(f=>{f.fg.position.set(f.p0.x*(on?0.55:1),f.p0.y*(on?0.6:1),on?-KART_LEN*0.5-0.15:f.p0.z);});
+  if(!on)return;
+  const root=THREE.SkeletonUtils?THREE.SkeletonUtils.clone(KGLB.scene):KGLB.scene.clone(true);
+  root.scale.setScalar(KGLB.s);root.position.set(-KGLB.cx*KGLB.s,KART_Y-KGLB.minY*KGLB.s,-KGLB.cz*KGLB.s);
+  const tint=KART_COLORS[idx];
+  root.traverse(o=>{if(!o.isMesh)return;o.castShadow=true;o.receiveShadow=true;o.frustumCulled=false;
+    const ms=Array.isArray(o.material)?o.material:[o.material];
+    const nm=ms.map(mt=>{const c=mt.clone();
+      if(tint!=null&&c.color){const nmn=(c.name||'')+' '+(o.name||'');const lum=c.color.r*0.3+c.color.g*0.59+c.color.b*0.11;
+        const dark=/tire|tyre|wheel|rubber|trim|black|dark|exhaust|seat/i.test(nmn)||(!c.map&&lum<0.16);
+        if(!dark)c.color.setHex(tint);}
+      return starify(c,m.su);});
+    o.material=Array.isArray(o.material)?nm:nm[0];});
+  const wrap=new THREE.Group();wrap.add(root);m.body.add(wrap);m.kartModel=wrap;
+}
 function setDriverModel(m,idx){
   if(m.drvModel){m.drv.remove(m.drvModel);m.drvModel=null;}m.mixer=null;
   const G=GLB[idx];
   m.procParts.forEach(o=>o.visible=!G);
-  if(!G){m.drv.position.y=1.15;return;}
-  m.drv.position.y=SEAT_Y;
+  const hk=!!m.kartModel;
+  if(!G){m.drv.position.set(0,hk?0.62:1.15,hk?-0.1:-0.2);return;}
+  m.drv.position.set(0,hk?KART_SEAT_Y:SEAT_Y,hk?-0.1:-0.2);
   const root=THREE.SkeletonUtils?THREE.SkeletonUtils.clone(G.scene):G.scene.clone(true);
   root.scale.setScalar(G.s);root.position.set(-G.cx*G.s,-G.minY*G.s,-G.cz*G.s);
   root.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;o.frustumCulled=false;}});
@@ -1359,6 +1386,15 @@ function loadScriptChain(urls,test,done){
   e.onerror=()=>loadScriptChain(urls.slice(1),test,done);
   document.head.appendChild(e);
 }
+const DRACO_FALLBACKS=['https://unpkg.com/three@0.128.0/examples/js/loaders/DRACOLoader.js','https://fastly.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/DRACOLoader.js'];
+let _ld=null;
+function getLoader(){if(_ld)return _ld;_ld=new THREE.GLTFLoader();
+  if(THREE.DRACOLoader){const d=new THREE.DRACOLoader();d.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/draco/gltf/');_ld.setDRACOLoader(d);}
+  return _ld;}
+function visBox(scene){scene.updateMatrixWorld(true);const b=new THREE.Box3(),mb=new THREE.Box3();
+  scene.traverse(o=>{if(!o.isMesh)return;for(let a=o;a;a=a.parent)if(!a.visible)return;
+    if(o.geometry){if(!o.geometry.boundingBox)o.geometry.computeBoundingBox();mb.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);b.union(mb);}});
+  if(b.isEmpty())throw new Error('no visible meshes');return b;}
 let glbTried=false;
 function loadGLBs(onLoad){
   if(!THREE.GLTFLoader){
@@ -1366,18 +1402,17 @@ function loadGLBs(onLoad){
     const e=document.getElementById('glbst');if(e)e.textContent='Loading GLTFLoader…';
     loadScriptChain(GLTF_FALLBACKS,()=>!!THREE.GLTFLoader,ok=>{
       if(!ok){glbStatus();return;}
-      loadScriptChain(SKEL_FALLBACKS,()=>!!THREE.SkeletonUtils,()=>loadGLBs(onLoad));
+      loadScriptChain(DRACO_FALLBACKS,()=>!!THREE.DRACOLoader,()=>loadScriptChain(SKEL_FALLBACKS,()=>!!THREE.SkeletonUtils,()=>loadGLBs(onLoad)));
     });
     return;
   }
-  const ld=new THREE.GLTFLoader();glbStatus();
+  const ld=getLoader();glbStatus();
+  ld.load('./models/kart1.glb',g=>{try{const b=visBox(g.scene),sz=new THREE.Vector3(),c=new THREE.Vector3();b.getSize(sz);b.getCenter(c);
+      KGLB={scene:g.scene,s:KART_LEN/Math.max(sz.z,1e-4),cx:c.x,cz:c.z,minY:b.min.y};onLoad(-1);}catch(e){console.warn('kart1.glb unusable',e);}},undefined,()=>console.warn('kart1.glb failed to load; using built-in kart'));
   for(let i=0;i<8;i++){
     ld.load('./models/racer'+(i+1)+'.glb',g=>{
-      try{g.scene.updateMatrixWorld(true);const b=new THREE.Box3(),sz=new THREE.Vector3(),c=new THREE.Vector3(),mb=new THREE.Box3();
-        g.scene.traverse(o=>{if(!o.isMesh)return;for(let a=o;a;a=a.parent)if(!a.visible)return;
-          if(o.geometry){if(!o.geometry.boundingBox)o.geometry.computeBoundingBox();mb.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);b.union(mb);}});
-        if(b.isEmpty())throw new Error('no visible meshes');b.getSize(sz);b.getCenter(c);
-        GLB[i]={scene:g.scene,clips:g.animations||[],s:DRIVER_H*(RACER_SCALES[i]||1)/Math.max(sz.y,1e-4),cx:c.x,cz:c.z,minY:b.min.y};glbOK++;onLoad(i);}
+      try{const b=visBox(g.scene),sz=new THREE.Vector3(),c=new THREE.Vector3();b.getSize(sz);b.getCenter(c);
+        GLB[i]={scene:g.scene,clips:g.animations||[],s:Math.min(DRIVER_H/Math.max(sz.y,1e-4),DRIVER_W/Math.max(sz.x,sz.z,1e-4))*(RACER_SCALES[i]||1),cx:c.x,cz:c.z,minY:b.min.y};glbOK++;onLoad(i);}
       catch(e){glbFail++;console.warn('racer'+(i+1)+'.glb unusable',e);}
       glbStatus();
     },undefined,err=>{glbFail++;console.warn('racer'+(i+1)+'.glb failed to load; using built-in driver');glbStatus();});
@@ -1405,6 +1440,7 @@ function makeKartMesh(def){
   // seat
   bx(1.3,0.9,0.5,dk,0,1.4,-0.85);bx(1.1,0.25,1.0,dk,0,1.05,-0.25);
   // driver (leans into turns)
+  const chassisParts=body.children.slice();
   const drv=new THREE.Group();drv.position.set(0,1.15,-0.2);body.add(drv);const procParts=[];
   const tor=new THREE.Mesh(new THREE.CylinderGeometry(0.42,0.52,0.95,10),mc);tor.position.y=0.48;drv.add(tor);
   const belt=new THREE.Mesh(new THREE.CylinderGeometry(0.535,0.535,0.14,10),bk);belt.position.y=0.18;drv.add(belt);
@@ -1442,8 +1478,9 @@ function makeKartMesh(def){
   flames.forEach(f=>{f.o.castShadow=false;f.i.castShadow=false;});
   const disc=new THREE.Mesh(new THREE.CircleGeometry(3.4,32),new THREE.MeshBasicMaterial({color:def.color,transparent:true,opacity:0.0,depthWrite:false,blending:THREE.AdditiveBlending}));disc.rotation.x=-Math.PI/2;disc.position.y=0.12;g.add(disc);
   drv.children.forEach(o=>procParts.push(o));
-  const res={group:g,body,wheels,head:headG,drv,swg,flames,fo,fi,su,disc,procParts,drvModel:null,mixer:null};
-  setDriverModel(res,def.idx);
+  const res={group:g,body,wheels,head:headG,drv,swg,flames,fo,fi,su,disc,procParts,chassisParts,drvModel:null,mixer:null,kartModel:null};
+  flames.forEach(f=>{f.p0=f.fg.position.clone();});wheels.forEach(w=>{w.p0=w.wg.position.clone();});
+  setKartModel(res,def.idx);setDriverModel(res,def.idx);
   return res;
 }
 function makeShellMesh(c){
@@ -2149,7 +2186,7 @@ buildCards();setMode(1);buildTracks();
 
 /* ---------- boot: attract-mode title ---------- */
 loadTrack(0);resetRace(0,[]);state.phase='title';state.go=true;
-loadGLBs(i=>{karts.forEach(k=>{if(k.def.idx===i)setDriverModel(k.mesh,i);});if(tKart&&tIdx===i){tScene.remove(tKart.group);tKart=null;tIdx=-1;}});
+loadGLBs(i=>{if(i<0){karts.forEach(k=>{setKartModel(k.mesh,k.def.idx);setDriverModel(k.mesh,k.def.idx);});tScene.remove(tKart&&tKart.group);tKart=null;tIdx=-1;return;}karts.forEach(k=>{if(k.def.idx===i)setDriverModel(k.mesh,i);});if(tKart&&tIdx===i){tScene.remove(tKart.group);tKart=null;tIdx=-1;}});
 karts.forEach(k=>{k.speed=0;});
 requestAnimationFrame(frame);
 })();
