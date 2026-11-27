@@ -265,7 +265,7 @@ function updateEngines(){
    ============================================================ */
 const canvas=$('c');
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
-renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.5));
 renderer.setSize(innerWidth,innerHeight,false);
 renderer.setScissorTest(true);
 const scene=new THREE.Scene();
@@ -742,11 +742,10 @@ function loadTrack(i,cb){
   TI=i;TRK=TRACKS[i];clearWorld();setupCurve(TRK);planJumps();
   WALL=TRK.fall?1e9:(TRK.wallLat||19);SHW=TRK.fall?14.2:SHW;
   applyEnv(TRK);
-  buildRoad();buildWalls();buildStilts();buildArch();buildPads();buildRamps();buildGaps();buildBoxes();buildIces();
-  TRK.deco();
-  buildHazards();
-  drawMiniBG();
-  if(GLB_TRACKS&&i<10&&THREE.GLTFLoader)loadGLBTrack(i,cb);else{glbStatus();if(cb)cb();}
+  const useG=GLB_TRACKS&&i<10&&THREE.GLTFLoader&&!GLB_MISSING.has(i);
+  const full=()=>{buildRoad();buildWalls();buildStilts();buildArch();buildPads();buildRamps();buildGaps();buildBoxes();buildIces();TRK.deco();buildHazards();drawMiniBG();};
+  if(useG)loadGLBTrack(i,cb,full);   /* the built-in map is only built if the .glb is missing: no flash, faster loads */
+  else{full();glbStatus();if(cb)cb();}
 }
 
 /* ---------- scenery helpers + prop library (all procedural) ---------- */
@@ -1582,10 +1581,31 @@ let KINFO='';
 /* ===== GLB TRACKS: lazy-loaded ./models/track{n}.glb, BVH ground collision, waypoint recorder ===== */
 /* Paste recorded waypoints here (press R to record, C to copy):  GLB_WAYPOINTS[3]=[[x,y,z],...]  or fill the object */
 const GLB_WAYPOINTS={};
-const GLB_TRACKS=true,TRACK_W=400;
+const GLB_TRACKS=true,TRACK_W=400,MIN_ROAD_W=38;
 const BVH_URLS=['https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.5.23/build/index.umd.cjs','https://unpkg.com/three-mesh-bvh@0.5.23/build/index.umd.cjs','https://fastly.jsdelivr.net/npm/three-mesh-bvh@0.5.23/build/index.umd.cjs'];
 const GLBT={on:false,free:false,meshes:[],minY:0,token:0,loading:false,msg:'',bvh:false,after:null};
-const _rc=new THREE.Raycaster(),_ro=new V3(),_rd=new V3(0,-1,0),_gn=new V3();
+const _rc=new THREE.Raycaster(),_ro=new V3(),_rd=new V3(0,-1,0),_gn=new V3(),_wo=new V3(),_wd=new V3(),_wn=new V3(),WALL_ANG=[0,0.65,-0.65,1.5708,-1.5708,2.5,-2.5];
+/* solid buildings / walls: short horizontal BVH rays around the kart push it out and slide it along the surface */
+function glbWalls(k,dt){
+  if(k.air&&k.y>(k.gy||0)+2.5)return;
+  const R=1.75;
+  for(let q=0;q<WALL_ANG.length;q++){
+    const a=k.h+WALL_ANG[q];_wd.set(Math.sin(a),0,Math.cos(a));_wo.set(k.x,k.y+0.8,k.z);
+    _rc.set(_wo,_wd);_rc.firstHitOnly=true;_rc.near=0;_rc.far=R;
+    const h=_rc.intersectObjects(GLBT.meshes,false)[0];if(!h||!h.face)continue;
+    _wn.copy(h.face.normal).transformDirection(h.object.matrixWorld);_wn.y=0;if(_wn.lengthSq()<1e-4)continue;
+    if(Math.abs(h.face.normal.y)>0.6)continue;
+    _wn.normalize();if(_wn.x*_wd.x+_wn.z*_wd.z>0)_wn.negate();
+    const pen=R-h.distance;if(pen<=0)continue;k.x+=_wn.x*pen;k.z+=_wn.z*pen;
+    const vn=Math.sin(k.h)*_wn.x+Math.cos(k.h)*_wn.z;
+    if(vn<-0.05){const imp=-vn*Math.abs(k.speed);k.speed*=1-Math.min(0.55,-vn*0.7);
+      let tx=-_wn.z,tz=_wn.x;if(tx*Math.sin(k.h)+tz*Math.cos(k.h)<0){tx=-tx;tz=-tz;}
+      k.h+=wrapA(Math.atan2(tx,tz)-k.h)*Math.min(1,dt*7);k.slip*=0.6;
+      if(imp>9&&k.wallCd<=0){k.wallCd=0.35;if(k.human)SFX.thud();for(let i=0;i<6;i++)spark(k.x-_wn.x*1.2,k.y+1,k.z-_wn.z*1.2,rnd(-4,4),rnd(1,5),rnd(-4,4),0.4,1.0,1,0.85,0.4,14);}}
+  }
+}
+function glbClear(k,ang,len){const a=k.h+ang;_wd.set(Math.sin(a),0,Math.cos(a));_wo.set(k.x,k.y+0.8,k.z);_rc.set(_wo,_wd);_rc.firstHitOnly=true;_rc.near=0;_rc.far=len;
+  const h=_rc.intersectObjects(GLBT.meshes,false)[0];if(h&&h.face&&Math.abs(h.face.normal.y)<0.6)return h.distance;return len;}
 function trkStatus(m){GLBT.msg=m;glbStatus();}
 function ensureBVH(cb){
   loadScriptChain(BVH_URLS,()=>!!window.MeshBVHLib,ok=>{
@@ -1593,16 +1613,22 @@ function ensureBVH(cb){
     cb(ok);});
 }
 function glbGround(x,y,z){_ro.set(x,y,z);_rc.set(_ro,_rd);_rc.firstHitOnly=true;_rc.near=0;_rc.far=90;const h=_rc.intersectObjects(GLBT.meshes,false);return h.length?h[0]:null;}
-function loadGLBTrack(i,cb){
-  const n=i+1,tok=++GLBT.token;GLBT.loading=true;trkStatus('Track '+n+': loading…');
-  const done=()=>{if(tok===GLBT.token){GLBT.loading=false;const a=GLBT.after;GLBT.after=null;if(cb)cb();if(a)a();}};
-  ensureBVH(ok=>{
-    getLoader().load('./models/track'+n+'.glb',gltf=>{
-      if(tok!==GLBT.token||TI!==i){disposeTree(gltf.scene);return;}
-      try{installGLBTrack(i,gltf.scene,ok);}catch(e){console.warn('track glb install failed',e);trkStatus('Track '+n+': error → built-in map');}
-      done();
-    },undefined,()=>{trkStatus('track'+n+'.glb not found → built-in map');done();});
-  });
+const GLB_MISSING=new Set();
+function showLoading(on,msg){let d=document.getElementById('trkload');
+  if(!d){d=document.createElement('div');d.id='trkload';d.style.cssText='position:fixed;inset:0;z-index:25;display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;background:rgba(10,14,30,.72);color:#fff;font:800 22px system-ui;letter-spacing:2px;pointer-events:none';
+    d.innerHTML='<div style="width:54px;height:54px;border:6px solid rgba(255,255,255,.25);border-top-color:#ffd23f;border-radius:50%;animation:tkspin .8s linear infinite"></div><div id="trkloadt"></div><style>@keyframes tkspin{to{transform:rotate(360deg)}}</style>';document.body.appendChild(d);}
+  d.style.display=on?'flex':'none';if(msg)document.getElementById('trkloadt').textContent=msg;}
+function loadGLBTrack(i,cb,full){
+  const n=i+1,tok=++GLBT.token;GLBT.loading=true;trkStatus('Track '+n+': loading…');showLoading(true,'LOADING TRACK '+n+'…');
+  const finish=()=>{if(tok!==GLBT.token)return;GLBT.loading=false;showLoading(false);const a=GLBT.after;GLBT.after=null;if(cb)cb();if(a)a();};
+  const miss=m=>{if(tok!==GLBT.token)return;GLB_MISSING.add(i);if(full)full();trkStatus(m);finish();};
+  let bv=null,gl=null;
+  const join=()=>{if(bv===null||gl===null||tok!==GLBT.token)return;
+    if(gl===false){miss('track'+n+'.glb not found → built-in map');return;}
+    if(TI!==i){disposeTree(gl.scene);return;}
+    try{installGLBTrack(i,gl.scene,bv);finish();}catch(e){console.warn('track glb install failed',e);miss('Track '+n+': could not use .glb → built-in map');}};
+  ensureBVH(ok=>{bv=ok;join();});            /* BVH library and the model download in parallel */
+  getLoader().load('./models/track'+n+'.glb',g=>{gl=g;join();},undefined,()=>{gl=false;join();});
 }
 function installGLBTrack(i,root,bvhOK){
   const n=i+1;root.updateMatrixWorld(true);
@@ -1615,10 +1641,23 @@ function installGLBTrack(i,root,bvhOK){
     (Array.isArray(o.material)?o.material:[o.material]).forEach(m=>{if(m)m.side=THREE.DoubleSide;});
     if(bvhOK&&o.geometry.computeBoundsTree&&!o.geometry.boundsTree)o.geometry.computeBoundsTree();
     meshes.push(o);tris+=(o.geometry.index?o.geometry.index.count:o.geometry.attributes.position.count)/3;});
-  GLBT.meshes=meshes;GLBT.minY=0;
+  GLBT.meshes=meshes;GLBT.minY=0;GLBT.roadW=0;GLBT.fscale=1;
   // road spline: recorded waypoints, otherwise a free-drive circle that rides the model's own surface
   const wp=GLB_WAYPOINTS[n],top=bb.max.y+5;let cp;
-  if(wp&&wp.length>=6)cp=wp.map(p=>[p[0],p[2],p[1]]);
+  if(wp&&wp.length>=6){
+    const ws=TRACK_W/400;let pts=wp.map(p=>[p[0]*ws,p[1]*ws,p[2]*ws]);
+    if(pts.length>6&&Math.hypot(pts[0][0]-pts[pts.length-1][0],pts[0][2]-pts[pts.length-1][2])<22)pts.pop();
+    // measure the real road width and enlarge the whole map until 8 karts fit side by side
+    const wds=[],np=pts.length;
+    for(let q=0;q<np;q++){const a=pts[q],b2=pts[(q+1)%np],c0=pts[(q+np-1)%np],dx=b2[0]-c0[0],dz=b2[2]-c0[2],dl=Math.hypot(dx,dz)||1,rx=-dz/dl,rz=dx/dl,ext=[0,0];
+      [1,-1].forEach((sg,si)=>{let gap=0;for(let t=1;t<90;t++){const h=glbGround(a[0]+rx*sg*t,a[1]+3,a[2]+rz*sg*t);if(h&&Math.abs(h.point.y-a[1])<3.5){ext[si]=t;gap=0;}else if(++gap>4)break;}});
+      wds.push(ext[0]+ext[1]);const sh=clamp((ext[0]-ext[1])/2,-18,18);if(ext[0]+ext[1]>6){a[0]+=rx*sh;a[2]+=rz*sh;}}  /* re-centre each waypoint on the real road */
+    wds.sort((x,y)=>x-y);const W=wds[Math.floor(wds.length/2)]||30,f=Math.min(3,Math.max(1,MIN_ROAD_W/Math.max(W,6)));
+    if(f>1.05){root.scale.multiplyScalar(f);root.position.multiplyScalar(f);root.updateMatrixWorld(true);pts=pts.map(p=>[p[0]*f,p[1]*f,p[2]*f]);bb.setFromObject(root);}
+    GLBT.roadW=W*f;GLBT.fscale=f;
+    for(let pass=0;pass<2;pass++){const m=pts.length,q2=pts.map(p=>p.slice());for(let q=0;q<m;q++){const a=q2[(q+m-1)%m],c=q2[q],b2=q2[(q+1)%m];pts[q]=[(a[0]+2*c[0]+b2[0])/4,(a[1]+2*c[1]+b2[1])/4,(a[2]+2*c[2]+b2[2])/4];}}
+    cp=pts.map(p=>[p[0],p[2],p[1]]);
+  }
   else{ // free-drive: find the drivable surface nearest the model's centre and lay a small loop there
     let best=null,bd=1e9;
     for(let r=0;r<=200&&!best;r+=10)for(let q=0;q<(r?24:1);q++){const aa=q/24*TAU,x=Math.cos(aa)*r,z=Math.sin(aa)*r,h=glbGround(x,top,z);if(h&&r<bd){bd=r;best={x,z,y:h.point.y};}}
@@ -1626,10 +1665,12 @@ function installGLBTrack(i,root,bvhOK){
     for(let q=0;q<8;q++){const aa=q/8*TAU,x=best.x+Math.cos(aa)*12,z=best.z+Math.sin(aa)*12,h=glbGround(x,best.y+20,z);cp.push([x,z,h?h.point.y:best.y]);}}
   const def=Object.assign({},TRACKS[i],{cp,start:null,jumps:[],ramps:[],pads:[],ice:[],hz:[],fall:false,wallLat:1e9,boxes:undefined,deco(){}});
   clearWorld();TRK=def;setupCurve(def);planJumps();WALL=1e9;applyEnv(def);
+  root.updateMatrixWorld(true);root.traverse(o=>{o.matrixAutoUpdate=false;o.updateMatrix();});
   add(root);GLBT.on=true;GLBT.free=!(wp&&wp.length>=6);
   if(!GLBT.free){buildArch();buildBoxes();}
   buildHazards();drawMiniBG();
-  trkStatus('Track '+n+': GLB loaded ('+Math.round(tris/1000)+'k tris'+(GLBT.bvh?', BVH':', NO BVH')+(GLBT.free?') · free-drive — press R to record waypoints':')'));
+  trkStatus('Track '+n+': GLB loaded ('+Math.round(tris/1000)+'k tris'+(GLBT.bvh?', BVH':', NO BVH')+(GLBT.free?') · free-drive — press R to record waypoints':', road '+Math.round(GLBT.roadW)+'u wide'+(GLBT.fscale>1.05?', map enlarged ×'+GLBT.fscale.toFixed(2):'')+')'));
+  try{renderer.compile(scene,(players[0]&&players[0].cam)||camera);}catch(e){}
   if(state.phase==='title'){resetRace(0,[]);karts.forEach(k=>{k.speed=0;});}
 }
 /* waypoint recorder: R toggles, a point every 15 units; C copies the array */
@@ -1668,7 +1709,7 @@ function visBox(scene){scene.updateMatrixWorld(true);const b=new THREE.Box3(),mb
   scene.traverse(o=>{if(!o.isMesh)return;for(let a=o;a;a=a.parent)if(!a.visible)return;
     if(o.isSkinnedMesh&&o.boneTransform){ /* skinned models: bone/armature scale changes the real size, so measure the posed vertices */
       o.skeleton.update();const pa=o.geometry.attributes.position,v=new THREE.Vector3();
-      for(let i=0;i<pa.count;i++){v.fromBufferAttribute(pa,i);o.boneTransform(i,v);v.applyMatrix4(o.matrixWorld);b.expandByPoint(v);}
+      const stp=Math.max(1,Math.floor(pa.count/3000));for(let i=0;i<pa.count;i+=stp){v.fromBufferAttribute(pa,i);o.boneTransform(i,v);v.applyMatrix4(o.matrixWorld);b.expandByPoint(v);}
     }else if(o.geometry){if(!o.geometry.boundingBox)o.geometry.computeBoundingBox();mb.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);b.union(mb);}});
   if(b.isEmpty())throw new Error('no visible meshes');return b;}
 let glbTried=false;
@@ -2088,6 +2129,7 @@ function updateKart(k,dt,I,first){
   const va=k.vh-k.slip; k.x+=Math.sin(va)*k.speed*dt;k.z+=Math.cos(va)*k.speed*dt;
   locate(k);
   if(k.falling){k.fvy-=GRAV*1.1*dt;k.y+=k.fvy*dt;k.group.position.set(k.x,k.y,k.z);return;}
+  if(GLBT.on)glbWalls(k,dt);
   if(WALL<1000&&Math.abs(k.lat)>WALL){
     const sg=Math.sign(k.lat),over=Math.abs(k.lat)-WALL; k.x-=Fr.rx*sg*over;k.z-=Fr.rz*sg*over;k.lat=sg*WALL;
     k.h+=wrapA(Fr.hd-k.h)*Math.min(1,dt*7); k.speed*=Math.max(0,1-1.4*dt);k.slip*=0.6;
@@ -2115,6 +2157,7 @@ function updateKart(k,dt,I,first){
     else{gy=GLBT.minY-40;if(!k.air&&!k.falling){k.air=true;k.vy=0;k.airT=0;}}}
   k.gy=gy;
   if(k.air){k.vy-=GRAV*dt;k.y+=k.vy*dt;k.airT+=dt;if(GLBT.on&&k.y<GLBT.minY-25)startFall(k);if(k.y<=gy&&k.vy<0&&!k.falling&&!(GAPS.length&&inGap(k.fi))){k.y=gy;k.air=false;k.vy=0;if(k.trick){k.boost=Math.max(k.boost,1.2);k.boostTier=2;if(k.human)pMsg(players[k.pIdx],'TRICK BOOST!','#ffd23f');shake(k,0.4);}else if(k.airT>0.4){k.boost=Math.max(k.boost,0.45);}k.trick=false;k.trickT=0;k.fromRamp=false;if(k.human)SFX.land();for(let i=0;i<8;i++)emit(k.x,k.y+0.3,k.z,rnd(-4,4),rnd(1,3),rnd(-4,4),0.5,1.3,0.85,0.8,0.7,0);}}
+  else if(GLBT.on&&Math.abs(gy-k.y)<1.2)k.y+=(gy-k.y)*Math.min(1,dt*28);
   else k.y=gy;
   if(GAPS.length&&!k.falling){
     if(inGap(k.fi)&&(!k.air||k.y<gy-3))startFall(k);
@@ -2208,7 +2251,7 @@ function updateKartVisual(k,dt,I){
    ============================================================ */
 function aiInput(k,dt){
   const I={steer:0,accel:1,brake:0,hop:false,drift:false,item:false};
-  k.laneT-=dt;if(k.laneT<=0){k.laneT=rnd(2,5);k.lane=rnd(-8,8);}
+  k.laneT-=dt;if(k.laneT<=0){k.laneT=rnd(2,5);k.lane=rnd(-8,8)*(GLBT.on?Math.min(1,(GLBT.roadW||20)/60):1);}
   const look=7+Math.min(14,Math.abs(k.speed)/5);
   frameAt(k.fi+look,F2);
   const tx=F2.cx+F2.rx*k.lane,tz=F2.cz+F2.rz*k.lane;
@@ -2216,6 +2259,13 @@ function aiInput(k,dt){
   const sh=Math.sin(k.h),ch=Math.cos(k.h);
   for(const b of bananas){const dx=b.x-k.x,dz=b.z-k.z,fw=dx*sh+dz*ch;if(fw>0&&fw<22){const sd=dx*ch-dz*sh;if(Math.abs(sd)<3.2)steer+=sd>0?-0.9:0.9;}}
   for(const h of HZ){if(!h.avoid)continue;const dx=h.ax-k.x,dz=h.az-k.z,fw=dx*sh+dz*ch;if(fw>0&&fw<h.look){const sd=dx*ch-dz*sh;if(Math.abs(sd)<h.ar+1.6)steer+=(sd>0?-1:1)*(1.1-0.4*fw/h.look);}}
+  if(GLBT.on){ // sense walls/buildings ahead and steer toward the clearer side; recover when stuck
+    const dF=glbClear(k,0,13),dP=glbClear(k,0.55,10),dN=glbClear(k,-0.55,10);
+    if(dF<13)steer+=(dP>dN?1:-1)*(1-dF/13)*1.6;
+    if(dP<5)steer-=0.7*(1-dP/5);if(dN<5)steer+=0.7*(1-dN/5);
+    if(state.go&&!k.falling&&Math.abs(k.speed)<3&&k.boost<=0){k.stuckT=(k.stuckT||0)+dt;
+      if(k.stuckT>1.4){k.stuckT=0;frameAt(k.fi,F2);k.h=F2.hd;k.vh=F2.hd;k.speed=9;k.x-=F2.rx*clamp(k.lat,-6,6)*0.8;k.z-=F2.rz*clamp(k.lat,-6,6)*0.8;}}else k.stuckT=0;
+  }
   if(TRK.fall){const e=Math.abs(k.lat)-9;if(e>0)steer+=(k.lat>0?1:-1)*e*0.35;}
   I.steer=clamp(steer,-1,1);
   frameAt(k.fi+16,F2);const kap=Math.abs(F2.curv);
@@ -2261,7 +2311,7 @@ function updateRubber(){
 function collideKarts(){
   for(let a=0;a<karts.length;a++)for(let b=a+1;b<karts.length;b++){
     const A=karts[a],B=karts[b];if(Math.abs(A.y-B.y)>3)continue;
-    const dx=B.x-A.x,dz=B.z-A.z,d2=dx*dx+dz*dz,R=3.5;
+    const dx=B.x-A.x,dz=B.z-A.z,d2=dx*dx+dz*dz,R=GLBT.on?2.7:3.5;
     if(d2<R*R&&d2>1e-6){
       const d=Math.sqrt(d2),ov=R-d,nx=dx/d,nz=dz/d,wa=A.st.wt,wb=B.st.wt,pa=ov*wb/(wa+wb),pb=ov-pa;
       A.x-=nx*pa;A.z-=nz*pa;B.x+=nx*pb;B.z+=nz*pb;
