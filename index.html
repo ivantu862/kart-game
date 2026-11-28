@@ -7970,6 +7970,7 @@ TRACK_NAMES.forEach((n,i)=>{if(TRACKS[i]){TRACKS[i].name=n[0];TRACKS[i].sub=n[1]
 function getWP(n){if(GLB_WAYPOINTS[n]&&GLB_WAYPOINTS[n].length>=6)return GLB_WAYPOINTS[n];try{const t=JSON.parse(localStorage.getItem('tk_wp_'+n)||'null');if(t&&t.length>=6)return t;}catch(e){}return null;}
 const GLB_TRACKS=true,TRACK_W=900,TRACK_W_N={};  /* TRACK_W: default map width in world units; override one map with TRACK_W_N[3]=1200. Waypoints are stored normalised, so changing this keeps them valid */  /* map width in world units; waypoints are stored normalised, so changing this keeps them valid */
 const BVH_URLS=['https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.5.23/build/index.umd.cjs','https://unpkg.com/three-mesh-bvh@0.5.23/build/index.umd.cjs','https://fastly.jsdelivr.net/npm/three-mesh-bvh@0.5.23/build/index.umd.cjs'];
+const START_RE=/start|finish|checker|goal/i;
 const WATER_RE=/water|sea\b|ocean|lake|river|lagoon|pond|puddle|liquid|wave/i;
 const GLBT={waterY:-1e9,col:null,colSolid:null,ws:1,on:false,free:false,meshes:[],minY:0,token:0,loading:false,msg:'',bvh:false,after:null};
 const _rc=new THREE.Raycaster(),_ro=new V3(),_rd=new V3(0,-1,0),_gn=new V3(),_wo=new V3(),_wd=new V3(),_wn=new V3(),WALL_ANG=[0,0.65,-0.65,1.5708,-1.5708,2.5,-2.5];
@@ -8044,7 +8045,7 @@ function loadGLBTrack(i,cb){
 }
 /* ===== AUTO ROAD DETECTION: finds the road mesh(es), rasterises them, traces the centre-line loop ===== */
 const ROAD_RE=/road|asphalt|street|race|circuit|highway|tarmac|pave|lane|bridge|ramp|boost|dirt|track/i;
-function autoRoad(list,bb,TW){
+function autoRoad(list,bb,TW,so){
   const cs=Math.max(2,TW/280),W=Math.ceil((bb.max.x-bb.min.x)/cs)+4,H=Math.ceil((bb.max.z-bb.min.z)/cs)+4,ox=bb.min.x-2*cs,oz=bb.min.z-2*cs;
   const stats=new Map(),a=new V3(),b=new V3(),c=new V3(),e1=new V3(),e2=new V3(),nn=new V3();
   const ranges=m=>{const g=m.geometry,total=g.index?g.index.count:g.attributes.position.count;
@@ -8134,7 +8135,14 @@ function autoRoad(list,bb,TW){
   const m=rs.length,curv=rs.map((p,i)=>{const p0=rs[(i-2+m)%m],p2=rs[(i+2)%m];const a1=Math.atan2(p[0]-p0[0],p[2]-p0[2]),a2=Math.atan2(p2[0]-p[0],p2[2]-p[2]);let d=a2-a1;while(d>Math.PI)d-=TAU;while(d<-Math.PI)d+=TAU;return Math.abs(d);});
   let bs=0,bl=0;for(let i=0;i<m;i++){if(curv[i]>0.1)continue;let l=0;while(l<m&&curv[(i+l)%m]<=0.1)l++;if(l>bl){bl=l;bs=i;}if(l>=m)break;}
   let s0;if(bl>=3)s0=(bs+Math.floor(bl*0.6))%m;else{let mi=0;for(let i=1;i<m;i++)if(curv[i]<curv[mi])mi=i;s0=mi;}
-  const out=rs.slice(s0).concat(rs.slice(0,s0));
+  let ring=rs.slice(s0).concat(rs.slice(0,s0));
+  if(so){   /* start line given (saved with B, or a mesh named start/finish): put the grid there, facing the way the kart faced */
+    const nearest=A2=>{let bi=0,bd2=1e18;A2.forEach((p,i)=>{const d=(p[0]-so.x)**2+(p[2]-so.z)**2;if(d<bd2){bd2=d;bi=i;}});return [bi,Math.sqrt(bd2)];};
+    let [bi,bdist]=nearest(ring);
+    if(bdist<120){
+      if(so.dx!==undefined){const a1=ring[bi],a2=ring[(bi+1)%ring.length];if((a2[0]-a1[0])*so.dx+(a2[2]-a1[2])*so.dz<0){ring.reverse();bi=nearest(ring)[0];}}
+      ring=ring.slice(bi).concat(ring.slice(0,bi));}}
+  const out=ring;
   return {pts:out,roadW,cells:bestN,cs};
 }
 function trackFailed(i,msg){
@@ -8154,21 +8162,22 @@ async function installGLBTrack(i,root,bvhOK,tok){
   bb.setFromObject(root);const c=bb.getCenter(new V3());root.position.x-=c.x;root.position.z-=c.z;root.position.y-=bb.min.y;root.updateMatrixWorld(true);
   bb.setFromObject(root);
   const t0=performance.now();root.updateMatrixWorld(true);
-  const all=[],solid=[];let tris=0,skipped=0,wY=-1e9,waterN=0;const _bx=new THREE.Box3();
+  const all=[],solid=[];let tris=0,skipped=0,wY=-1e9,waterN=0,sHint=null;const _bx=new THREE.Box3();
   root.traverse(o=>{if(!o.isMesh||o.isSkinnedMesh||o.isInstancedMesh||!o.geometry.attributes.position)return;o.castShadow=false;o.receiveShadow=false;
     const ms=Array.isArray(o.material)?o.material:[o.material],tr=ms.some(m=>m&&(m.transparent&&m.opacity<0.95||m.alphaTest>0));
     let wn=o.name||'';for(let a=o.parent;a&&a!==root;a=a.parent)wn+=' '+a.name;ms.forEach(m=>{if(m&&m.name)wn+=' '+m.name;});
+    if(START_RE.test(wn)){const sb=new THREE.Box3().setFromObject(o),dd=sb.min.distanceTo(sb.max);if(!sHint||dd>sHint.d){const cc=sb.getCenter(new V3());sHint={x:cc.x,z:cc.z,d:dd};}}
     if(WATER_RE.test(wn)||ms.some(m=>m&&m.transparent&&m.opacity<0.9&&!m.alphaTest)){const wb=new THREE.Box3().setFromObject(o);if(wb.max.y-wb.min.y<6)wY=Math.max(wY,wb.max.y);waterN++;return;}  /* water: visual only, never ground */
     const tc=(o.geometry.index?o.geometry.index.count:o.geometry.attributes.position.count)/3;tris+=tc;
     if(tc<400){if(!o.geometry.boundingBox)o.geometry.computeBoundingBox();_bx.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);if(_bx.min.distanceTo(_bx.max)<4){skipped++;return;}}  /* tiny props (flowers, pebbles) are not collidable: keeps the BVH small */
     all.push(o);if(!tr)solid.push(o);});
   await stage('BUILDING COLLISION… ('+Math.round(tris/1000)+'k triangles)');if(tok!==GLBT.token){disposeTree(root);return;}
   /* collision: ONE merged world-space mesh (+ one BVH) instead of hundreds of meshes, so a ray costs microseconds */
-  GLBT.waterY=wY>-1e8?wY-0.3:-1e9;GLBT.col=mergeCollision(all,bvhOK);GLBT.colSolid=solid.length===all.length?GLBT.col:mergeCollision(solid,bvhOK);
+  GLBT.waterY=-1e9;   /* water is see-through and not solid, but a road under the water IS drivable */GLBT.col=mergeCollision(all,bvhOK);GLBT.colSolid=solid.length===all.length?GLBT.col:mergeCollision(solid,bvhOK);
   GLBT.meshes=[GLBT.col];GLBT.minY=0;GLBT.roadW=0;GLBT.fscale=1;GLBT.ws=TW/400;
   // road spline: recorded waypoints, otherwise a free-drive circle that rides the model's own surface
   const wp=getWP(n),top=bb.max.y+5;let cp,au=null;
-  if(!(wp&&wp.length>=6)){await stage('FINDING THE ROAD…');if(tok!==GLBT.token){disposeTree(root);return;}try{au=autoRoad(all,bb,TW);}catch(e){console.warn('autoRoad failed',e);}}
+  if(!(wp&&wp.length>=6)){await stage('FINDING THE ROAD…');if(tok!==GLBT.token){disposeTree(root);return;}let so=null;try{const sv=JSON.parse(localStorage.getItem('tk_start_'+n)||'null');if(sv)so={x:sv[0]*GLBT.ws,z:sv[1]*GLBT.ws,dx:sv[2],dz:sv[3]};}catch(e){}if(!so&&sHint)so={x:sHint.x,z:sHint.z};try{au=autoRoad(all,bb,TW,so);}catch(e){console.warn('autoRoad failed',e);}}
   if(au){cp=au.pts.map(p=>[p[0],p[2],p[1]]);GLBT.roadW=au.roadW;}
   else if(wp&&wp.length>=6){
     const ws=GLBT.ws;let pts=wp.map(p=>[p[0]*ws,p[1]*ws,p[2]*ws]);
@@ -8220,7 +8229,11 @@ function recKey(code){
   if(code==='KeyR'&&state.phase!=='paused'){
     if(REC.on){REC.on=false;REC.auto=false;recUI();return true;}
     REC.pts=[];REC.last=null;REC.startIdx=0;REC.on=true;REC.auto=true;recMsg('● RECORDING from this spot (= START LINE). Drive one full lap along the road; it saves itself when you get back here.','rgba(200,30,40,.9)');return true;}
-  if(code==='KeyX'){try{localStorage.removeItem('tk_wp_'+(TI+1));}catch(e){}recMsg('Saved racing line for this track deleted — reload the track and press R at the start line to record a new one','rgba(60,60,80,.9)');return true;}
+  if(code==='KeyB'){const k=karts[0];if(!k)return true;const w=GLBT.ws||1;
+    try{localStorage.setItem('tk_start_'+(TI+1),JSON.stringify([+(k.x/w).toFixed(2),+(k.z/w).toFixed(2),+Math.sin(k.h).toFixed(3),+Math.cos(k.h).toFixed(3)]));}catch(e){}
+    recMsg('✔ START LINE saved here, facing this way — restarting with everyone on the grid here…','rgba(20,140,60,.9)');
+    setTimeout(()=>{state.phase='loading';loadTrack(TI,beginRace);},700);return true;}
+  if(code==='KeyX'){try{localStorage.removeItem('tk_wp_'+(TI+1));localStorage.removeItem('tk_start_'+(TI+1));}catch(e){}recMsg('Saved racing line for this track deleted — reload the track and press R at the start line to record a new one','rgba(60,60,80,.9)');return true;}
   if(code==='KeyC'){const sIx=REC.startIdx||0,arr=REC.pts.slice(sIx).concat(REC.pts.slice(0,sIx)),txt=JSON.stringify(arr);console.log('GLB_WAYPOINTS['+(TI+1)+']='+txt);
     const ok=()=>{const d=document.getElementById('recbox');if(d){d.textContent='✔ copied '+REC.pts.length+' waypoints — paste into GLB_WAYPOINTS['+(TI+1)+']';}};
     const fb=()=>{const t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);t.select();try{document.execCommand('copy');ok();}catch(e){}t.remove();};
@@ -8765,7 +8778,7 @@ function updateKart(k,dt,I,first){
   }
 }
 function updateKartVisual(k,dt,I){
-  const m=k.mesh,g=k.group;if(m.mixer)m.mixer.update(dt);if(m.armFix)m.armFix();if(m.disc){const dm=m.disc.material;dm.opacity=k.human&&k.stun<=0?0.5+0.15*Math.sin(state.time*5):0;if(k.drift&&k.tier>0)dm.color.setHex([0x00f5d4,0x00f5d4,0xffd43b,0xff2bd6][k.tier]);else dm.color.setHex(k.def.color);}
+  const m=k.mesh,g=k.group;if(m.mixer)m.mixer.update(dt);if(m.armFix)m.armFix();if(m.disc)m.disc.visible=false;
   g.position.set(k.x,k.y+k.hopY+(k.stun>0?Math.sin(k.stun*8)*0.4:0),k.z);
   _qS.setFromUnitVectors(UP,k.nv);_qY.setFromAxisAngle(UP,k.h+k.spinA);g.quaternion.copy(_qS).multiply(_qY);
   const steer=state.go&&k.stun<=0?I.steer:0; k.steerVis+=(steer-k.steerVis)*Math.min(1,dt*12);
