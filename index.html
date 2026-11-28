@@ -7123,10 +7123,11 @@ function loadTrack(i,cb){
   TI=i;TRK=TRACKS[i];clearWorld();setupCurve(TRK);planJumps();
   WALL=TRK.fall?1e9:(TRK.wallLat||19);SHW=TRK.fall?14.2:SHW;
   applyEnv(TRK);
-  const useG=GLB_TRACKS&&i<10&&THREE.GLTFLoader&&!GLB_MISSING.has(i);
-  const full=()=>{buildRoad();buildWalls();buildStilts();buildArch();buildPads();buildRamps();buildGaps();buildBoxes();buildIces();TRK.deco();buildHazards();drawMiniBG();};
-  if(useG)loadGLBTrack(i,cb,full);   /* the built-in map is only built if the .glb is missing: no flash, faster loads */
-  else{full();glbStatus();if(cb)cb();}
+  /* every track is its own ./models/track{n}.glb; there is no built-in map fallback any more */
+  const go=()=>loadGLBTrack(i,cb);
+  if(THREE.GLTFLoader)go();
+  else loadScriptChain(GLTF_FALLBACKS,()=>!!THREE.GLTFLoader,ok=>{if(!ok){trackFailed(i,'The model loader (GLTFLoader) could not be downloaded — check your internet connection.');return;}
+    loadScriptChain(DRACO_FALLBACKS,()=>!!THREE.DRACOLoader,()=>loadScriptChain(SKEL_FALLBACKS,()=>!!THREE.SkeletonUtils,go));});
 }
 
 /* ---------- scenery helpers + prop library (all procedural) ---------- */
@@ -8019,22 +8020,132 @@ function showLoading(on,msg){let d=document.getElementById('trkload');
     d.innerHTML='<div style="width:54px;height:54px;border:6px solid rgba(255,255,255,.25);border-top-color:#ffd23f;border-radius:50%;animation:tkspin .8s linear infinite"></div><div id="trkloadt"></div><style>@keyframes tkspin{to{transform:rotate(360deg)}}</style>';document.body.appendChild(d);}
   d.style.display=on?'flex':'none';if(msg)document.getElementById('trkloadt').textContent=msg;}
 const stage=m=>{showLoading(true,m);return new Promise(r=>setTimeout(r,30));};
-function loadGLBTrack(i,cb,full){
-  const n=i+1,tok=++GLBT.token;GLBT.loading=true;const T0=performance.now();trkStatus('Track '+n+': loading…');showLoading(true,'LOADING TRACK '+n+'…');
+function loadGLBTrack(i,cb){
+  const n=i+1,tok=++GLBT.token;GLBT.loading=true;GLBT.failed=false;{const e=document.getElementById('trkerr');if(e)e.style.display='none';}const T0=performance.now();trkStatus('Track '+n+': loading…');showLoading(true,'LOADING TRACK '+n+'…');
   const finish=()=>{if(tok!==GLBT.token)return;GLBT.loading=false;showLoading(false);const a=GLBT.after;GLBT.after=null;if(cb)cb();if(a)a();};
-  const miss=m=>{if(tok!==GLBT.token)return;GLB_MISSING.add(i);if(full)full();trkStatus(m);finish();};
+  const miss=m=>{if(tok!==GLBT.token)return;GLBT.loading=false;trackFailed(i,m);};
   let bv=null,gl=null;
   const join=()=>{if(bv===null||gl===null||tok!==GLBT.token)return;
-    if(gl===false){miss('./models/track'+n+'.glb could not be loaded ('+(GLBT.err||'not found')+') → showing a built-in map instead. Check the file is uploaded at models/track'+n+'.glb (exact lowercase name, under 25 MB on GitHub)');return;}
+    if(gl===false){miss('./models/track'+n+'.glb could not be loaded ('+(GLBT.err||'not found')+') Check the file is uploaded at models/track'+n+'.glb (exact lowercase name, under 25 MB on GitHub)');return;}
     if(TI!==i){disposeTree(gl.scene);return;}
     GLBT.tdl=(performance.now()-T0)/1000;
-    installGLBTrack(i,gl.scene,bv,tok).then(()=>finish()).catch(e=>{console.warn('track glb install failed',e);miss('Track '+n+': could not use .glb → built-in map');});};
+    installGLBTrack(i,gl.scene,bv,tok).then(()=>finish()).catch(e=>{console.warn('track glb install failed',e);miss('Track '+n+': the .glb loaded but could not be used ('+String(e&&e.message||e).slice(0,100)+').');});};
   ensureBVH(ok=>{bv=ok;join();});            /* BVH library and the model download in parallel */
   const names=['track'+n+'.glb','Track'+n+'.glb','track'+('0'+n).slice(-2)+'.glb','track_'+n+'.glb','track-'+n+'.glb','TRACK'+n+'.glb','track'+n+'.GLB','Track_'+n+'.glb'];let lastErr='';
   const prog=ev=>{if(ev&&ev.total)showLoading(true,'DOWNLOADING TRACK '+n+'… '+Math.round(ev.loaded/1048576)+' / '+Math.round(ev.total/1048576)+' MB');else if(ev&&ev.loaded)showLoading(true,'DOWNLOADING TRACK '+n+'… '+Math.round(ev.loaded/1048576)+' MB');};
+  let fixes={};
   const tryName=k=>{if(k>=names.length){gl=false;GLBT.err=lastErr;join();return;}
-    getLoader().load('./models/'+names[k],g=>{gl=g;join();},prog,e=>{lastErr=(e&&e.message?e.message:'file not found').slice(0,90);if(/parse|json|draco|unexpected|invalid/i.test(lastErr)&&!/404|not found|Failed to fetch/i.test(lastErr)){gl=false;GLBT.err=lastErr;join();return;}tryName(k+1);});};
+    getLoader().load('./models/'+names[k],g=>{gl=g;join();},prog,e=>{lastErr=(e&&e.message?e.message:'file not found').slice(0,110);
+      if(/meshopt/i.test(lastErr)&&!fixes.mo){fixes.mo=1;showLoading(true,'LOADING MESHOPT DECODER…');loadScriptChain(['https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/meshopt_decoder.js','https://unpkg.com/three@0.128.0/examples/js/libs/meshopt_decoder.js'],()=>!!window.MeshoptDecoder,ok=>{if(ok&&_ld.setMeshoptDecoder)_ld.setMeshoptDecoder(window.MeshoptDecoder);tryName(k);});return;}
+      if(/draco/i.test(lastErr)&&!fixes.dr&&THREE.DRACOLoader){fixes.dr=1;const d=new THREE.DRACOLoader();d.setDecoderPath('https://unpkg.com/three@0.128.0/examples/js/libs/draco/gltf/');_ld.setDRACOLoader(d);tryName(k);return;}
+      if(/parse|json|draco|unexpected|invalid|basis|ktx|extension|required|decoder/i.test(lastErr)&&!/404|not found|Failed to fetch/i.test(lastErr)){gl=false;GLBT.err=lastErr;join();return;}
+      tryName(k+1);});};
   tryName(0);
+}
+/* ===== AUTO ROAD DETECTION: finds the road mesh(es), rasterises them, traces the centre-line loop ===== */
+const ROAD_RE=/road|asphalt|street|race|circuit|highway|tarmac|pave|lane|bridge|ramp|boost|dirt|track/i;
+function autoRoad(list,bb,TW){
+  const cs=Math.max(2,TW/280),W=Math.ceil((bb.max.x-bb.min.x)/cs)+4,H=Math.ceil((bb.max.z-bb.min.z)/cs)+4,ox=bb.min.x-2*cs,oz=bb.min.z-2*cs;
+  const stats=new Map(),a=new V3(),b=new V3(),c=new V3(),e1=new V3(),e2=new V3(),nn=new V3();
+  const ranges=m=>{const g=m.geometry,total=g.index?g.index.count:g.attributes.position.count;
+    if(Array.isArray(m.material)&&g.groups&&g.groups.length)return g.groups.map(q=>({s:q.start,n:Math.min(q.count,total-q.start),m:m.material[q.materialIndex]}));
+    return [{s:0,n:total,m:Array.isArray(m.material)?m.material[0]:m.material}];};
+  const world=(m,pa,i,v)=>{const e=m.matrixWorld.elements,x=pa.getX(i),y=pa.getY(i),z=pa.getZ(i);v.set(e[0]*x+e[4]*y+e[8]*z+e[12],e[1]*x+e[5]*y+e[9]*z+e[13],e[2]*x+e[6]*y+e[10]*z+e[14]);};
+  const nameOf=m=>{let s=m.name||'';for(let p=m.parent;p&&p.parent;p=p.parent)s+=' '+p.name;return s;};
+  const each=(m,rg,fn)=>{const g=m.geometry,pa=g.attributes.position,ix=g.index;
+    for(let t=rg.s;t<rg.s+rg.n;t+=3){const i0=ix?ix.getX(t):t,i1=ix?ix.getX(t+1):t+1,i2=ix?ix.getX(t+2):t+2;
+      world(m,pa,i0,a);world(m,pa,i1,b);world(m,pa,i2,c);e1.subVectors(b,a);e2.subVectors(c,a);nn.crossVectors(e1,e2);const ln=nn.length();if(ln<1e-9)continue;
+      if(Math.abs(nn.y)/ln<0.7)continue;fn(ln/2);}};
+  // pass 1: per-material statistics of up-facing surface
+  list.forEach(m=>ranges(m).forEach(rg=>{if(!rg.m)return;const key=rg.m.uuid,nm=nameOf(m)+' '+(rg.m.name||'')+' '+(m.name||'');
+    let st=stats.get(key);if(!st){st={key,named:ROAD_RE.test(nm),area:0,x0:1e9,x1:-1e9,z0:1e9,z1:-1e9};stats.set(key,st);}
+    each(m,rg,ar=>{st.area+=ar;st.x0=Math.min(st.x0,a.x,b.x,c.x);st.x1=Math.max(st.x1,a.x,b.x,c.x);st.z0=Math.min(st.z0,a.z,b.z,c.z);st.z1=Math.max(st.z1,a.z,b.z,c.z);});}));
+  const all=[...stats.values()];let pick=all.filter(s=>s.named&&s.area>300);
+  if(pick.reduce((q,s)=>q+s.area,0)<3000){
+    const cand=all.filter(s=>s.area>=2000&&s.area/Math.max(1,(s.x1-s.x0)*(s.z1-s.z0))<0.35),mx=Math.max(0,...cand.map(s=>s.area));
+    pick=cand.filter(s=>s.area>=0.2*mx);}
+  GLBT.ar={groups:all.length,pick:pick.length,W,H,cs};
+  if(!pick.length)return null;
+  const ok=new Set(pick.map(s=>s.key));
+  // pass 2: rasterise the road triangles into a grid
+  const occ=new Uint8Array(W*H),hg=new Float32Array(W*H);
+  const A=new V3(),B=new V3(),C=new V3();
+  list.forEach(m=>ranges(m).forEach(rg=>{if(!rg.m||!ok.has(rg.m.uuid))return;const g=m.geometry,pa=g.attributes.position,ix=g.index;
+    for(let t=rg.s;t<rg.s+rg.n;t+=3){const i0=ix?ix.getX(t):t,i1=ix?ix.getX(t+1):t+1,i2=ix?ix.getX(t+2):t+2;
+      world(m,pa,i0,A);world(m,pa,i1,B);world(m,pa,i2,C);e1.subVectors(B,A);e2.subVectors(C,A);nn.crossVectors(e1,e2);const ln=nn.length();if(ln<1e-9||Math.abs(nn.y)/ln<0.7)continue;
+      const x0=Math.min(A.x,B.x,C.x),x1=Math.max(A.x,B.x,C.x),z0=Math.min(A.z,B.z,C.z),z1=Math.max(A.z,B.z,C.z);
+      const cx0=Math.max(0,Math.floor((x0-ox)/cs)),cx1=Math.min(W-1,Math.floor((x1-ox)/cs)),cz0=Math.max(0,Math.floor((z0-oz)/cs)),cz1=Math.min(H-1,Math.floor((z1-oz)/cs));
+      const d=(B.z-C.z)*(A.x-C.x)+(C.x-B.x)*(A.z-C.z);if(Math.abs(d)<1e-9){continue;}
+      for(let cz=cz0;cz<=cz1;cz++)for(let cx=cx0;cx<=cx1;cx++){const px=ox+(cx+0.5)*cs,pz=oz+(cz+0.5)*cs;
+        const l1=((B.z-C.z)*(px-C.x)+(C.x-B.x)*(pz-C.z))/d,l2=((C.z-A.z)*(px-C.x)+(A.x-C.x)*(pz-C.z))/d,l3=1-l1-l2;
+        if(l1>=-0.02&&l2>=-0.02&&l3>=-0.02){const id=cz*W+cx;occ[id]=1;hg[id]=l1*A.y+l2*B.y+l3*C.y;}}}}));
+  const N8=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+  // close pin-holes: dilate then erode (4-neighbourhood)
+  const morph=(src,val)=>{const o=new Uint8Array(W*H);for(let z=1;z<H-1;z++)for(let x=1;x<W-1;x++){const i=z*W+x;
+      const n=src[i-1]+src[i+1]+src[i-W]+src[i+W]+src[i];o[i]=val?(n>0?1:0):(n===5?1:0);}return o;};
+  let g1=morph(morph(occ,1),0);
+  // keep the largest connected blob
+  const comp=new Int32Array(W*H).fill(-1);let best=-1,bestN=0,cid=0;const q=new Int32Array(W*H);
+  for(let i=0;i<W*H;i++){if(!g1[i]||comp[i]>=0)continue;let h=0,t=0;q[t++]=i;comp[i]=cid;
+    while(h<t){const u=q[h++],ux=u%W,uz=(u-ux)/W;for(const [dx,dz] of N8){const vx=ux+dx,vz=uz+dz;if(vx<0||vz<0||vx>=W||vz>=H)continue;const v=vz*W+vx;if(g1[v]&&comp[v]<0){comp[v]=cid;q[t++]=v;}}}
+    if(t>bestN){bestN=t;best=cid;}cid++;}
+  GLBT.ar.bestN=bestN;GLBT.ar.occ=occ.reduce((x,y)=>x+y,0);
+  if(best<0||bestN<250)return null;
+  const R=new Uint8Array(W*H);for(let i=0;i<W*H;i++)R[i]=comp[i]===best?1:0;
+  // distance to the road edge (chamfer)
+  const D=new Float32Array(W*H);for(let i=0;i<W*H;i++)D[i]=R[i]?1e4:0;
+  for(let z=1;z<H-1;z++)for(let x=1;x<W-1;x++){const i=z*W+x;if(!R[i])continue;D[i]=Math.min(D[i],D[i-1]+1,D[i-W]+1,D[i-W-1]+1.41,D[i-W+1]+1.41);}
+  for(let z=H-2;z>0;z--)for(let x=W-2;x>0;x--){const i=z*W+x;if(!R[i])continue;D[i]=Math.min(D[i],D[i+1]+1,D[i+W]+1,D[i+W+1]+1.41,D[i+W-1]+1.41);}
+  let S=-1,dm=0;for(let i=0;i<W*H;i++)if(R[i]&&D[i]>dm){dm=D[i];S=i;}
+  GLBT.ar.dm=dm;
+  if(dm<1.2)return null;
+  const cost=i=>1+40/((D[i]+1)*(D[i]+1));
+  const dijk=(src,dst,blocked)=>{const dist=new Float64Array(W*H).fill(1e30),prev=new Int32Array(W*H).fill(-1);const hp=[];
+    const push=(c,i)=>{hp.push([c,i]);let k=hp.length-1;while(k>0){const p=(k-1)>>1;if(hp[p][0]<=hp[k][0])break;[hp[p],hp[k]]=[hp[k],hp[p]];k=p;}};
+    const pop=()=>{const top=hp[0],last=hp.pop();if(hp.length){hp[0]=last;let k=0;for(;;){let l=2*k+1,r=l+1,s=k;if(l<hp.length&&hp[l][0]<hp[s][0])s=l;if(r<hp.length&&hp[r][0]<hp[s][0])s=r;if(s===k)break;[hp[s],hp[k]]=[hp[k],hp[s]];k=s;}}return top;};
+    dist[src]=0;push(0,src);
+    while(hp.length){const [dc,u]=pop();if(dc>dist[u])continue;if(u===dst)break;const ux=u%W,uz=(u-ux)/W;
+      for(const [dx,dz] of N8){const vx=ux+dx,vz=uz+dz;if(vx<0||vz<0||vx>=W||vz>=H)continue;const v=vz*W+vx;if(!R[v]||(blocked&&blocked[v]))continue;
+        const nd=dc+(dx&&dz?1.41:1)*0.5*(cost(u)+cost(v));if(nd<dist[v]){dist[v]=nd;prev[v]=u;push(nd,v);}}}
+    if(dist[dst]>=1e29)return null;const p=[];for(let u=dst;u!==-1;u=prev[u])p.push(u);return p.reverse();};
+  // farthest road cell from S (BFS) = roughly the opposite side of the loop
+  const bd=new Int32Array(W*H).fill(-1);let h=0,t=0,Aend=S;q[t++]=S;bd[S]=0;
+  while(h<t){const u=q[h++];Aend=u;const ux=u%W,uz=(u-ux)/W;for(const [dx,dz] of N8){const vx=ux+dx,vz=uz+dz;if(vx<0||vz<0||vx>=W||vz>=H)continue;const v=vz*W+vx;if(R[v]&&bd[v]<0){bd[v]=bd[u]+1;q[t++]=v;}}}
+  const p1=dijk(S,Aend,null);GLBT.ar.p1=p1?p1.length:0;if(!p1||p1.length<20)return null;
+  const blocked=new Uint8Array(W*H);
+  for(let k=10;k<p1.length-10;k++){const u=p1[k],ux=u%W,uz=(u-ux)/W,r=Math.ceil(D[u]*0.55+1);
+    for(let dz=-r;dz<=r;dz++)for(let dx=-r;dx<=r;dx++){if(dx*dx+dz*dz>r*r)continue;const vx=ux+dx,vz=uz+dz;if(vx<0||vz<0||vx>=W||vz>=H)continue;blocked[vz*W+vx]=1;}}
+  {let bc=0;for(let i=0;i<W*H;i++)bc+=blocked[i];GLBT.ar.blocked=bc;GLBT.ar.S=[S%W,(S/W)|0];GLBT.ar.A=[Aend%W,(Aend/W)|0];GLBT.ar.bS=blocked[S];GLBT.ar.bA=blocked[Aend];}
+  if(window.__arDbg){let o=[];for(let z=0;z<H;z+=6){let r='';for(let x=0;x<W;x+=3){const i=z*W+x;r+=blocked[i]&&R[i]?'#':R[i]?'o':'.';}o.push(r);}GLBT.ar.map=o.join('\n');}
+  if(window.__arDbg){const seen=new Uint8Array(W*H);let h2=0,t2=0;q[t2++]=Aend;seen[Aend]=1;while(h2<t2){const u=q[h2++],ux=u%W,uz=(u-ux)/W;for(const [dx,dz] of N8){const vx=ux+dx,vz=uz+dz;if(vx<0||vz<0||vx>=W||vz>=H)continue;const v=vz*W+vx;if(R[v]&&!blocked[v]&&!seen[v]){seen[v]=1;q[t2++]=v;}}}GLBT.ar.reach=t2;GLBT.ar.reachS=seen[S];}
+  const p2=dijk(Aend,S,blocked);GLBT.ar.p2=p2?p2.length:0;if(!p2||p2.length<20)return null;
+  const cells=p1.concat(p2.slice(1,-1));
+  let pts=cells.map(u=>{const ux=u%W,uz=(u-ux)/W;return [ox+(ux+0.5)*cs,hg[u],oz+(uz+0.5)*cs];});
+  const widths=cells.map(u=>D[u]).sort((p,q2)=>p-q2),roadW=2*widths[widths.length>>1]*cs;
+  // smooth the closed loop, then resample every ~15 units
+  const smooth=(P,it,k)=>{for(let s=0;s<it;s++){const m=P.length,Q=P.map(p=>p.slice());for(let i=0;i<m;i++){let sx=0,sy=0,sz=0;for(let j=-k;j<=k;j++){const p=Q[(i+j+m)%m];sx+=p[0];sy+=p[1];sz+=p[2];}pts_[i]=[sx/(2*k+1),sy/(2*k+1),sz/(2*k+1)];}P=pts_.slice();}return P;};
+  var pts_=new Array(pts.length);pts=smooth(pts,4,3);
+  const SP=15,len=[0];for(let i=1;i<=pts.length;i++){const p=pts[i%pts.length],r2=pts[i-1];len.push(len[i-1]+Math.hypot(p[0]-r2[0],p[2]-r2[2]));}
+  const total=len[len.length-1],n=Math.max(12,Math.round(total/SP));if(total<SP*10)return null;
+  const rs=[];let seg=0;for(let k=0;k<n;k++){const d=k*total/n;while(len[seg+1]<d)seg++;const f=(d-len[seg])/Math.max(1e-6,len[seg+1]-len[seg]),p=pts[seg%pts.length],r2=pts[(seg+1)%pts.length];rs.push([p[0]+(r2[0]-p[0])*f,p[1]+(r2[1]-p[1])*f,p[2]+(r2[2]-p[2])*f]);}
+  // refine heights on the real surface
+  rs.forEach(p=>{const g=glbGround(p[0],p[1]+3,p[2]);if(g)p[1]=g.point.y;});
+  // start line: middle of the longest straight stretch
+  const m=rs.length,curv=rs.map((p,i)=>{const p0=rs[(i-2+m)%m],p2=rs[(i+2)%m];const a1=Math.atan2(p[0]-p0[0],p[2]-p0[2]),a2=Math.atan2(p2[0]-p[0],p2[2]-p[2]);let d=a2-a1;while(d>Math.PI)d-=TAU;while(d<-Math.PI)d+=TAU;return Math.abs(d);});
+  let bs=0,bl=0;for(let i=0;i<m;i++){if(curv[i]>0.1)continue;let l=0;while(l<m&&curv[(i+l)%m]<=0.1)l++;if(l>bl){bl=l;bs=i;}if(l>=m)break;}
+  let s0;if(bl>=3)s0=(bs+Math.floor(bl*0.6))%m;else{let mi=0;for(let i=1;i<m;i++)if(curv[i]<curv[mi])mi=i;s0=mi;}
+  const out=rs.slice(s0).concat(rs.slice(0,s0));
+  return {pts:out,roadW,cells:bestN,cs};
+}
+function trackFailed(i,msg){
+  GLBT.loading=false;GLBT.on=false;GLBT.free=false;showLoading(false);trkStatus(msg);console.warn(msg);
+  let d=document.getElementById('trkerr');
+  if(!d){d=document.createElement('div');d.id='trkerr';d.style.cssText='position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:40;max-width:560px;background:rgba(20,24,44,.96);color:#fff;border:3px solid #ff5a5a;border-radius:16px;padding:20px 24px;font:600 15px system-ui;text-align:center';document.body.appendChild(d);}
+  d.innerHTML='<div style="font:800 22px system-ui;color:#ff8a8a;margin-bottom:8px">TRACK '+(i+1)+' COULD NOT LOAD</div><div style="margin-bottom:14px"></div><button id="trkretry" style="font:800 16px system-ui;padding:8px 18px;border-radius:10px;border:0;background:#ffd23f;cursor:pointer">RETRY</button> <button id="trkok" style="font:800 16px system-ui;padding:8px 18px;border-radius:10px;border:0;background:#cfd6ee;cursor:pointer">PICK ANOTHER TRACK</button>';
+  d.children[1].textContent=msg;d.style.display='block';
+  document.getElementById('trkretry').onclick=()=>{d.style.display='none';loadTrack(i,state.phase==='loading'?beginRace:null);};
+  document.getElementById('trkok').onclick=()=>{d.style.display='none';};
+  if(state.phase==='loading'||state.phase==='countdown'||state.phase==='racing'){try{toTitle();}catch(e){}}
 }
 async function installGLBTrack(i,root,bvhOK,tok){
   const n=i+1;await stage('PREPARING TRACK '+n+'…');if(tok!==GLBT.token){disposeTree(root);return;}root.updateMatrixWorld(true);
@@ -8056,8 +8167,10 @@ async function installGLBTrack(i,root,bvhOK,tok){
   GLBT.waterY=wY>-1e8?wY-0.3:-1e9;GLBT.col=mergeCollision(all,bvhOK);GLBT.colSolid=solid.length===all.length?GLBT.col:mergeCollision(solid,bvhOK);
   GLBT.meshes=[GLBT.col];GLBT.minY=0;GLBT.roadW=0;GLBT.fscale=1;GLBT.ws=TW/400;
   // road spline: recorded waypoints, otherwise a free-drive circle that rides the model's own surface
-  const wp=getWP(n),top=bb.max.y+5;let cp;
-  if(wp&&wp.length>=6){
+  const wp=getWP(n),top=bb.max.y+5;let cp,au=null;
+  if(!(wp&&wp.length>=6)){await stage('FINDING THE ROAD…');if(tok!==GLBT.token){disposeTree(root);return;}try{au=autoRoad(all,bb,TW);}catch(e){console.warn('autoRoad failed',e);}}
+  if(au){cp=au.pts.map(p=>[p[0],p[2],p[1]]);GLBT.roadW=au.roadW;}
+  else if(wp&&wp.length>=6){
     const ws=GLBT.ws;let pts=wp.map(p=>[p[0]*ws,p[1]*ws,p[2]*ws]);
     if(pts.length>6&&Math.hypot(pts[0][0]-pts[pts.length-1][0],pts[0][2]-pts[pts.length-1][2])<22)pts.pop();
     {const m=pts.length,q2=pts.map(p=>p.slice());for(let q=0;q<m;q++){const a=q2[(q+m-1)%m],c=q2[q],b2=q2[(q+1)%m];pts[q]=[(a[0]+2*c[0]+b2[0])/4,(a[1]+2*c[1]+b2[1])/4,(a[2]+2*c[2]+b2[2])/4];}}
@@ -8072,11 +8185,11 @@ async function installGLBTrack(i,root,bvhOK,tok){
   const def=Object.assign({},TRACKS[i],{cp,start:null,jumps:[],ramps:[],pads:[],ice:[],hz:[],fall:false,wallLat:1e9,boxes:undefined,deco(){}});
   clearWorld();TRK=def;setupCurve(def);planJumps();WALL=1e9;applyEnv(def);
   root.updateMatrixWorld(true);root.traverse(o=>{o.matrixAutoUpdate=false;o.updateMatrix();});
-  add(root);GLBT.on=true;GLBT.free=!(wp&&wp.length>=6);
+  add(root);GLBT.on=true;GLBT.auto=!!au;GLBT.free=!(au||(wp&&wp.length>=6));
   if(!GLBT.free){buildArch();buildBoxes();{const d=document.getElementById('recbox');if(d&&!REC.on)d.style.display='none';}}
-  else setTimeout(()=>recMsg('NO RACING LINE FOR TRACK '+n+' YET: start the race, drive to the real START LINE, press R, then drive one lap along the road. It saves automatically and bots + grid use it. (G shows the line, X deletes it)','rgba(30,90,200,.92)'),400);
+  else setTimeout(()=>recMsg('COULD NOT AUTO-DETECT THE ROAD ON TRACK '+n+': start the race, drive to the real START LINE, press R, then drive one lap along the road. It saves automatically and bots + grid use it. (G shows the line, X deletes it)','rgba(30,90,200,.92)'),400);
   buildHazards();drawMiniBG();
-  trkStatus('Track '+n+': GLB loaded ('+Math.round(tris/1000)+'k tris'+(GLBT.bvh?', BVH':', NO BVH')+(GLBT.free?') · NO RACING LINE YET — drive to the start line, press R, drive one lap':')')+' · download+parse '+(GLBT.tdl||0).toFixed(1)+'s, collision '+((performance.now()-t0)/1000).toFixed(1)+'s'+(skipped?', '+skipped+' tiny props ignored':''));
+  trkStatus('Track '+n+': GLB loaded ('+Math.round(tris/1000)+'k tris'+(GLBT.bvh?', BVH':', NO BVH')+(GLBT.free?') · could not detect the road automatically — drive to the start line, press R, drive one lap':GLBT.auto?', road auto-detected, ~'+Math.round(au.roadW)+' wide, '+cp.length+' points)':')')+' · download+parse '+(GLBT.tdl||0).toFixed(1)+'s, collision '+((performance.now()-t0)/1000).toFixed(1)+'s'+(skipped?', '+skipped+' tiny props ignored':''));
   if(state.phase==='title'){resetRace(0,[]);karts.forEach(k=>{k.speed=0;});}
 }
 /* waypoint recorder: R toggles, a point every 15 units; C copies the array */
